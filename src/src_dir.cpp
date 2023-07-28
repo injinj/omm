@@ -430,11 +430,13 @@ Source::make_link( const char *key,  size_t keylen,
 void
 Source::pop_link( ServiceLinkInfo *linkp ) noexcept
 {
-  size_t i;
+  size_t i, sz = sizeof( this->link[ 0 ] );
   for ( i = 0; linkp != this->link[ i ]; i++ )
     ;
-  for ( ; i < this->link_cnt - 1; i++ )
-    this->link[ i ] = this->link[ i + 1 ];
+  if ( i + 1 < this->link_cnt ) {
+    sz *= this->link_cnt - ( i + 1 );
+    ::memmove( &this->link[ i ], &this->link[ i + 1 ], sz );
+  }
   this->link[ --this->link_cnt ] = NULL;
   delete linkp;
   if ( this->link_cnt == 0 )
