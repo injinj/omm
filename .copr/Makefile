@@ -4,7 +4,7 @@ spec   := rpm/$(name).spec
 date   := $(shell date +"%a %b %d %Y")
 rpmdir := $(shell pwd)
 
-#git_hash    := $(shell git rev-parse --short=8 HEAD)
+git_hash    := $(shell git rev-parse --short=8 HEAD)
 major_num   := 1
 minor_num   := 0
 patch_num   := 0
