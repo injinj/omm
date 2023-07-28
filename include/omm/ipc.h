@@ -234,8 +234,11 @@ struct ClientInitRec {
     md::RwfDecoder inp( (uint8_t *) p, (uint8_t *) &p[ len ] );
     uint16_t sz = 0;
     uint8_t  hdr_size,
-             compr_bitmap_size,
+             compr_bitmap_size = 0,
              comp_len_size;
+    this->host_len    = 0;
+    this->ip_addr_len = 0;
+    this->comp_len    = 0;
     inp.u16 ( sz )
        .u8  ( this->op_code )
        .u32 ( this->conn_ver )
@@ -333,6 +336,8 @@ struct ServerInitRec {
   bool unpack( char *p,  size_t len ) {
     md::RwfDecoder inp( (uint8_t *) p, (uint8_t *) &p[ len ] );
     uint16_t sz = 0;
+    uint8_t  comp_len_size;
+    this->comp_len = 0;
     inp.u16( sz );
     inp.u8 ( this->op_code )
        .u8 ( this->ext_code )
@@ -359,7 +364,7 @@ struct ServerInitRec {
       * needs key exchange reply */
       inp.ok = false;
     }
-    inp.u8 ( this->comp_len ) /* out */
+    inp.u8 ( comp_len_size ) /* out */
        .u8 ( this->comp_len );
     if ( inp.ok ) {
       if ( &inp.buf[ this->comp_len ] > inp.eob )
