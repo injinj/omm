@@ -33,7 +33,7 @@ struct OmmClientCB {
 };
 
 struct LoginInfo;
-struct SourceDB;
+struct OmmSourceDB;
 struct DictInProg;
 struct IpcFrag;
 
@@ -56,9 +56,9 @@ struct EvOmmClient : public EvOmmConn, public kv::RouteNotify {
               * token;
 
   void * operator new( size_t, void *ptr ) { return ptr; }
-  EvOmmClient( kv::EvPoll &p,  OmmDict &d ) noexcept;
+  EvOmmClient( kv::EvPoll &p,  OmmDict &d,  OmmSourceDB &db ) noexcept;
   bool connect( EvOmmClientParameters &p,  kv::EvConnectionNotify *n = NULL,
-                OmmClientCB *c = NULL,  SourceDB *db = NULL ) noexcept;
+                OmmClientCB *c = NULL ) noexcept;
   virtual bool timer_expire( uint64_t timer_id, uint64_t event_id ) noexcept;
   virtual void process( void ) noexcept;
   virtual void release( void ) noexcept;

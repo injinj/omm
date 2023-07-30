@@ -30,9 +30,9 @@ EvOmmClient::send_dictionary_request( void ) noexcept
     fprintf( stderr, "dictionary already in progress\n" );
     return;
   }
-  SourceDB &db = *this->source_db;
+  OmmSourceDB &db = this->source_db;
   for ( size_t i = 0; i < db.source_list.count; i++ ) {
-    Source * src;
+    OmmSource * src;
     for ( src = db.source_list.ptr[ i ].hd; src != NULL; src = src->next ) {
       if ( fld_dict_name == NULL && src->info.num_dict > 0 ) {
         fld_dict_name = src->info.dictionaries_provided[ 0 ]; /* 0 = fld */
@@ -102,17 +102,16 @@ EvOmmClient::recv_dictionary_response( RwfMsg &msg ) noexcept
   }
   bool is_field_dict = ( hdr.stream_id == p->field_stream_id );
   if ( (summary = series->get_summary_msg()) != NULL ) {
-    MDFieldIter * iter;
-    MDReference   mref;
-    if ( summary->get_field_iter( iter ) == 0 &&
-         iter->find( "Type", mref ) == 0 ) {
-      bool is_wrong = false;
-      switch ( get_int<uint8_t>( mref ) ) {
-        case 1: is_wrong = ! is_field_dict; break;
-        case 2: is_wrong = is_field_dict;   break;
+    MDFieldReader rd( *summary );
+    uint8_t type;
+    if ( rd.find( "Type" ) && rd.get_uint( type ) ) {
+      bool is_flipped = false;
+      switch ( type ) {
+        case 1: is_flipped = ! is_field_dict; break;
+        case 2: is_flipped = is_field_dict;   break;
         default: break;
       }
-      if ( is_wrong ) {
+      if ( is_flipped ) {
         is_field_dict = ! is_field_dict;
         uint32_t tmp = p->enum_stream_id;
         p->enum_stream_id  = p->field_stream_id;
@@ -155,7 +154,7 @@ EvOmmService::recv_dictionary_request( RwfMsg &msg ) noexcept
     return;
   }
   RwfMsgKey & msg_key       = hdr.msg_key;
-  Source    * source        = NULL;
+  OmmSource * source        = NULL;
   MDFid       fid_start     = dict->min_fid,
               fid_end       = 0;
   uint32_t    map_start     = 1,
@@ -170,7 +169,7 @@ EvOmmService::recv_dictionary_request( RwfMsg &msg ) noexcept
 
   if ( msg_key.test( X_HAS_FILTER ) )
     verb = msg_key.filter;
-  source = this->source_db->find_source( msg_key.service_id, 0 );
+  source = this->source_db.find_source( msg_key.service_id, 0 );
 
   for ( ; source != NULL; source = source->next ) {
     const char * dict1 = source->info.dictionaries_provided[ 0 ],

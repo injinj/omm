@@ -240,7 +240,7 @@ omm_lib   := $(libd)/libomm.a
 server_defines := -DOMM_VER=$(ver_build)
 $(objd)/server.o : .copr/Makefile
 $(objd)/server.fpic.o : .copr/Makefile
-omm_server_files := server
+omm_server_files := server test_pub
 omm_server_cfile := $(addprefix src/, $(addsuffix .cpp, $(omm_server_files)))
 omm_server_objs  := $(addprefix $(objd)/, $(addsuffix .o, $(omm_server_files)))
 omm_server_deps  := $(addprefix $(dependd)/, $(addsuffix .d, $(omm_server_files)))

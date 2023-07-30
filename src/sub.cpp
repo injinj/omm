@@ -19,23 +19,25 @@ bool
 EvOmmClient::send_subscribe( const char *sub,  size_t sub_len ) noexcept
 {
   RouteLoc     loc;
-  Source     * src;
+  OmmSource  * src;
   OmmRoute   * rt;
   const char * ric     = sub;
   size_t       ric_len = sub_len;
   uint8_t      domain  = MARKET_PRICE_DOMAIN;
 
-  if ( (src = this->source_db->match_sub( ric, ric_len, domain,
-                                          this->start_ns )) == NULL )
+  if ( (src = this->source_db.match_sub( ric, ric_len, domain,
+                                         this->start_ns )) == NULL )
     return false;
   uint32_t stream_id, h = kv_crc_c( sub, sub_len, 0 );
 
   rt = this->sub_tab.upsert( h, sub, sub_len, loc );
+  rt->is_solicited = true;
   if ( loc.is_new ) {
-    stream_id         = this->next_stream_id++;
+    stream_id      = this->next_stream_id++;
     rt->service_id = src->service_id;
     rt->domain     = domain;
     rt->stream_id  = stream_id;
+    rt->msg_cnt    = 0;
 
     this->stream_ht->upsert_rsz( this->stream_ht, stream_id, h );
   }
@@ -62,17 +64,17 @@ bool
 EvOmmClient::send_unsubscribe( const char *sub,  size_t sub_len ) noexcept
 {
   RouteLoc     loc;
-  Source     * src;
+  OmmSource  * src;
   OmmRoute   * rt;
   const char * ric     = sub;
   size_t       ric_len = sub_len;
   uint8_t      domain  = MARKET_PRICE_DOMAIN;
 
-  if ( (src = this->source_db->match_sub( ric, ric_len, domain,
-                                          this->start_ns )) == NULL )
+  if ( (src = this->source_db.match_sub( ric, ric_len, domain,
+                                         this->start_ns )) == NULL )
     return false;
   
-  uint32_t h = kv_crc_c( sub, len, 0 );
+  uint32_t h = kv_crc_c( sub, sub_len, 0 );
   rt = this->sub_tab.find( h, sub, sub_len, loc );
 
   if ( rt == NULL )
@@ -105,7 +107,7 @@ EvOmmClient::forward_msg( RwfMsg &msg ) noexcept
     debug_print( "forward_msg", msg );
 
   OmmSubjRoute sub_rt;
-  if ( this->find_stream_id( msg.msg, sub_rt ) ) {
+  if ( this->find_stream( msg.msg.stream_id, sub_rt, false ) ) {
     if ( this->cb == NULL )
       this->publish_msg( msg, sub_rt );
     else
@@ -121,8 +123,19 @@ EvOmmConn::on_msg( EvPublish &pub ) noexcept
   if ( rt == NULL )
     return true;
 
-  if ( pub.msg_enc == RWF_MSG_TYPE_ID ) {
-    size_t    len = pub.msg_len + 3;
+  if ( pub.msg_enc == RWF_MSG_TYPE_ID && pub.msg_len > 10 ) {
+    if ( ((uint8_t *) pub.msg)[ 2 ] == REFRESH_MSG_CLASS ) {
+      uint16_t msg_flags = 0;
+      get_u15_prefix( &((uint8_t *) pub.msg)[ 8 ],
+                      &((uint8_t *) pub.msg)[ pub.msg_len ], msg_flags );
+      if ( ( msg_flags & 0x20 ) != 0 ) {
+        if ( ! rt->is_solicited )
+          return true;
+        rt->is_solicited = false; /* only let one solicitied msg through */
+      }
+    }
+    rt->msg_cnt++;
+    size_t len = pub.msg_len + 3;
     if ( len > this->max_frag_size )
       this->fragment_msg( (const uint8_t *) pub.msg, pub.msg_len,
                           rt->stream_id );
@@ -141,27 +154,75 @@ EvOmmConn::on_msg( EvPublish &pub ) noexcept
 }
 
 bool
-EvOmmConn::find_stream_id( RwfMsgHdr &hdr,  OmmSubjRoute &sub_rt ) noexcept
+EvOmmConn::find_stream( uint32_t stream_id,  OmmSubjRoute &sub_rt,
+                        bool check_coll ) noexcept
 {
-  if ( this->stream_ht->find( hdr.stream_id, sub_rt.pos, sub_rt.hash ) ) {
+  if ( this->stream_ht->find( stream_id, sub_rt.pos, sub_rt.hash ) ) {
     sub_rt.rt = this->sub_tab.find_by_hash( sub_rt.hash, sub_rt.loc );
+    sub_rt.hcnt = 0;
     while ( sub_rt.rt != NULL ) {
-      if ( sub_rt.rt->stream_id == hdr.stream_id )
+      sub_rt.hcnt++;
+      if ( sub_rt.rt->stream_id == stream_id ) {
+        if ( check_coll && sub_rt.hcnt == 1 ) {
+          RouteLoc tmp_loc = sub_rt.loc;
+          if ( this->sub_tab.find_next_by_hash( sub_rt.hash, tmp_loc ) )
+            sub_rt.hcnt++;
+        }
         return true;
+      }
       sub_rt.rt = this->sub_tab.find_next_by_hash( sub_rt.hash, sub_rt.loc );
     }
   }
   return false;
 }
 
+void
+EvOmmConn::close_streams( void ) noexcept
+{
+  OmmSubjRoute sub_rt;
+  uint32_t     stream_id;
+
+  for ( bool b = this->stream_ht->first( sub_rt.pos ); b;
+        b = this->stream_ht->next( sub_rt.pos ) ) {
+    this->stream_ht->get( sub_rt.pos, stream_id, sub_rt.hash );
+
+    sub_rt.rt   = this->sub_tab.find_by_hash( sub_rt.hash, sub_rt.loc );
+    sub_rt.hcnt = 0;
+    while ( sub_rt.rt != NULL ) {
+      if ( sub_rt.rt->domain != 0 ) {
+        sub_rt.hcnt++;
+        if ( sub_rt.rt->stream_id == stream_id ) {
+          if ( sub_rt.hcnt == 1 ) {
+            RouteLoc tmp_loc = sub_rt.loc;
+            do {
+              OmmRoute *rt =
+                this->sub_tab.find_next_by_hash( sub_rt.hash, tmp_loc );
+              if ( rt == NULL )
+                break;
+              if ( rt->domain != 0 )
+                sub_rt.hcnt++;
+            } while ( sub_rt.hcnt == 1 );
+          }
+          NotifySub nsub( sub_rt.rt->value, sub_rt.rt->len, NULL, 0, sub_rt.hash,
+                          sub_rt.hcnt > 1, 'O', *this );
+          this->sub_route.del_sub( nsub );
+          sub_rt.rt->domain = 0;
+          break;
+        }
+      }
+      sub_rt.rt = this->sub_tab.find_next_by_hash( sub_rt.hash, sub_rt.loc );
+    }
+  }
+}
+
 bool
 EvOmmConn::msg_key_to_sub( RwfMsgHdr &hdr,  OmmSubject &subj ) noexcept
 {
   RwfMsgKey & msg_key = hdr.msg_key;
-  Source    * src     = NULL;
+  OmmSource * src     = NULL;
 
   if ( hdr.test( X_HAS_MSG_KEY ) && msg_key.test( X_HAS_SERVICE_ID ) ) {
-    src = this->source_db->find_source( msg_key.service_id, 0 );
+    src = this->source_db.find_source( msg_key.service_id, 0 );
     for ( ; src != NULL; src = src->next ) {
       if ( src->info.capability_exists( hdr.domain_type ) )
         break;
@@ -206,9 +267,11 @@ EvOmmConn::add_subj_stream( RwfMsgHdr &hdr,  OmmSubject &subj,
     return false;
 
   if ( sub_rt.loc.is_new ) {
-    sub_rt.rt->service_id = subj.src->service_id;
-    sub_rt.rt->domain     = hdr.domain_type;
-    sub_rt.rt->stream_id  = hdr.stream_id;
+    sub_rt.rt->service_id   = subj.src->service_id;
+    sub_rt.rt->domain       = hdr.domain_type;
+    sub_rt.rt->stream_id    = hdr.stream_id;
+    sub_rt.rt->msg_cnt      = 0;
+    sub_rt.rt->is_solicited = false;
 
     this->stream_ht->set_rsz( this->stream_ht, hdr.stream_id, sub_rt.pos,
                               subj.hash );
@@ -235,6 +298,7 @@ EvOmmService::process_msg( RwfMsg &msg ) noexcept
     if ( ! this->add_subj_stream( hdr, subj, sub_rt ) )
       this->send_status( msg, STATUS_CODE_ALREADY_OPEN, "Already subscribed" );
 
+    sub_rt.rt->is_solicited = true;
     NotifySub nsub( subj.sub, subj.sub_len, NULL, 0, subj.hash,
                     sub_rt.hcnt > 0, 'O', *this );
     if ( sub_rt.loc.is_new ) {
@@ -256,12 +320,16 @@ EvOmmService::process_msg( RwfMsg &msg ) noexcept
   }
   else if ( hdr.msg_class == UPDATE_MSG_CLASS ||
             hdr.msg_class == STATUS_MSG_CLASS ) {
-    if ( this->find_stream_id( hdr, sub_rt ) )
+    if ( this->find_stream( hdr.stream_id, sub_rt, false ) )
       this->publish_msg( msg, sub_rt );
   }
   else if ( hdr.msg_class == CLOSE_MSG_CLASS ) {
-    if ( this->find_stream_id( hdr, sub_rt ) ) {
-      printf( "close rt\n" );
+    if ( this->find_stream( hdr.stream_id, sub_rt, true ) ) {
+      NotifySub nsub( sub_rt.rt->value, sub_rt.rt->len, NULL, 0, sub_rt.hash,
+                      sub_rt.hcnt > 1, 'O', *this );
+      this->sub_route.del_sub( nsub );
+      this->stream_ht->remove( sub_rt.pos );
+      this->sub_tab.remove( sub_rt.loc );
     }
   }
 }

@@ -36,18 +36,19 @@ omm_get_version( void )
 }
 uint32_t rai::omm::omm_debug = 0;
 
-EvOmmListen::EvOmmListen( EvPoll &p,  OmmDict &d ) noexcept
+EvOmmListen::EvOmmListen( EvPoll &p,  OmmDict &d,  OmmSourceDB &db ) noexcept
            : EvTcpListen( p, "omm_listen", "omm_sock" ),
-             sub_route( p.sub_route ), dict( d ), x_source_db( 0 )
+             sub_route( p.sub_route ), dict( d ), x_source_db( db )
 {
-  this->init();
+  md_init_auto_unpack();
 }
 
-EvOmmListen::EvOmmListen( EvPoll &p,  OmmDict &d,  RoutePublish &sr ) noexcept
+EvOmmListen::EvOmmListen( EvPoll &p,  OmmDict &d,  OmmSourceDB &db,
+                          RoutePublish &sr ) noexcept
            : EvTcpListen( p, "omm_listen", "omm_sock" ),
-             sub_route( sr ), dict( d ), x_source_db( 0 )
+             sub_route( sr ), dict( d ), x_source_db( db )
 {
-  this->init();
+  md_init_auto_unpack();
 }
 
 EvSocket *
@@ -61,7 +62,7 @@ EvOmmListen::accept( void ) noexcept
   if ( this->accept2( *c, "omm" ) ) {
     printf( "accept %.*s\n", (int) c->get_peer_address_strlen(),
             c->peer_address.buf );
-    c->init( this->x_source_db );
+    c->init_streams();
     return c;
   }
   return NULL;
@@ -108,64 +109,92 @@ EvOmmService::process( void ) noexcept
 bool
 EvOmmService::dispatch_msg( IpcHdr &ipc,  char *buf ) noexcept
 {
-  char * msg = &buf[ ipc.header_len ];
-  size_t len = ipc.ipc_len - ipc.header_len;
-  MDOutput mout;
+  /* mormal messages are:
+   * [ header ] [ data : next_off - header_len ]
+   * msgs can be packed, the for loop advances header_len to next pack len:
+   * [ header ] [ pack len ] [ data ] [ pack len ] [ data ]
+   */
+  for (;;) {
+    char * msg = &buf[ ipc.header_len ];
+    size_t len = ipc.next_off - ipc.header_len;
+    ipc.header_len = ipc.next_off;
 
-  if ( len == 0 ) /* ping msg */
-    return true;
-  if ( is_omm_debug ) {
-    ipc.print( buf );
-    printf( "message:\n" );
-    mout.print_hex( msg, len );
-  }
-  if ( ipc.frag_id != 0 && len != ipc.extended_len ) {
-    if ( ! this->ipc_fragment.merge( ipc.frag_id, ipc.extended_len, msg, len ) )
-      return true;
-  }
-  if ( ipc.is_conn_init() ) {
-    ClientInitRec c;
-    if ( ! c.unpack( buf, ipc.ipc_len ) )
-      return false;
-    static const uint64_t PING_TIMER_ID = 1,
-                          PING_TIMER_EVENT = 1;
-    this->poll.timer.add_timer_millis( this->fd, c.ping_timeout * 1000 / 2,
-                                       PING_TIMER_ID, PING_TIMER_EVENT );
-    ServerInitRec r;
-    init_component_string( r );
-    size_t len = r.pack_len();
-    char * p = this->alloc( len );
-    r.pack( p );
-    this->sz += len; 
-  }
-  else if ( ipc.is_data() ) {
-    MDMsgMem mem;
-    RwfMsg * m = RwfMsg::unpack_message( msg, 0, len, RWF_MSG_TYPE_ID,
-                                         this->dict.rdm_dict, mem );
-    if ( m == NULL )
-      return false;
-    if ( m->msg.domain_type >= RDM_DOMAIN_COUNT ) {
-      m->print( &mout );
-      this->send_status( *m, STATUS_CODE_USAGE_ERROR,
-                         "Domain type not supported" );
+    while ( len == 0 ) { /* ping msgs are zero length */
+      if ( ipc.next_off + 2 >= ipc.ipc_len )
+        return true;
+      size_t pack_len = ( (size_t) ((uint8_t *) buf)[ ipc.next_off ] << 8 ) |
+                          (size_t) ((uint8_t *) buf)[ ipc.next_off + 1 ];
+      ipc.header_len += 2;
+      ipc.next_off = ipc.header_len + pack_len;
+      if ( ipc.next_off > ipc.ipc_len ) /* should error */
+        return true;
+      msg = &buf[ ipc.header_len ];
+      len = ipc.next_off - ipc.header_len;
+      ipc.header_len = ipc.next_off;
     }
-    printf( "%s domain\n", rdm_domain_str[ m->msg.domain_type ] );
-    switch ( m->msg.domain_type ) {
-      case LOGIN_DOMAIN:
-        this->recv_login_request( *m );
-        break;
-      case SOURCE_DOMAIN:
-        this->recv_directory_request( *m );
-        break;
-      case DICTIONARY_DOMAIN:
-        this->recv_dictionary_request( *m );
-        break;
-      default:
-        this->process_msg( *m );
-        break;
+
+    if ( is_omm_debug ) {
+      MDOutput mout;
+      printf( "message:\n" );
+      mout.print_hex( msg, len );
     }
+
+    if ( ipc.frag_id != 0 && len != ipc.extended_len ) {
+      if ( ! this->ipc_fragment.merge( ipc.frag_id, ipc.extended_len,
+                                       msg, len ) )
+        continue;
+      /* return true when fragmented msg is available */
+    }
+
+    if ( ipc.is_conn_init() ) {
+      ClientInitRec c;
+      if ( ! c.unpack( buf, ipc.ipc_len ) )
+        return false;
+      static const uint64_t PING_TIMER_ID = 1,
+                            PING_TIMER_EVENT = 1;
+      this->poll.timer.add_timer_millis( this->fd, c.ping_timeout * 1000 / 2,
+                                         PING_TIMER_ID, PING_TIMER_EVENT );
+      ServerInitRec r;
+      init_component_string( r );
+      size_t len = r.pack_len();
+      char * p = this->alloc( len );
+      r.pack( p );
+      this->sz += len;
+      continue;
+    }
+
+    if ( ipc.is_data() ) {
+      MDMsgMem mem;
+      RwfMsg * m = RwfMsg::unpack_message( msg, 0, len, RWF_MSG_TYPE_ID,
+                                           this->dict.rdm_dict, mem );
+      if ( m == NULL )
+        return false;
+
+      if ( m->msg.domain_type >= RDM_DOMAIN_COUNT ) {
+        this->send_status( *m, STATUS_CODE_USAGE_ERROR,
+                           "Domain type not supported" );
+        continue;
+      }
+      if ( is_omm_debug )
+        printf( "%s domain\n", rdm_domain_str[ m->msg.domain_type ] );
+
+      switch ( m->msg.domain_type ) {
+        case LOGIN_DOMAIN:
+          this->recv_login_request( *m );
+          break;
+        case SOURCE_DOMAIN:
+          this->recv_directory_request( *m );
+          break;
+        case DICTIONARY_DOMAIN:
+          this->recv_dictionary_request( *m );
+          break;
+        default:
+          this->process_msg( *m );
+          break;
+      }
+    }
+    /* otherwise, what is ipc? */
   }
-  return true;
 }
 
 void
@@ -173,6 +202,8 @@ EvOmmService::release( void ) noexcept
 {
   printf( "release %.*s\n", (int) this->get_peer_address_strlen(),
           this->peer_address.buf );
+  this->close_streams();
+  this->release_streams();
   this->EvConnection::release_buffers();
 }
 

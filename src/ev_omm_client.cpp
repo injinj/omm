@@ -16,8 +16,8 @@ using namespace kv;
 using namespace md;
 using namespace omm;
 
-EvOmmClient::EvOmmClient( EvPoll &p,  OmmDict &d ) noexcept
-  : EvOmmConn( p, p.register_type( "ommclient" ), p.sub_route, d ),
+EvOmmClient::EvOmmClient( EvPoll &p,  OmmDict &d,  OmmSourceDB &db ) noexcept
+  : EvOmmConn( p, p.register_type( "ommclient" ), p.sub_route, d, db ),
     RouteNotify( p.sub_route ), cb( 0 ), login( 0 ),
     dict_in_progress( 0 ), next_stream_id( 10 ),
     no_dictionary( false ), have_dictionary( false ),
@@ -30,7 +30,7 @@ bool OmmClientCB::on_msg( const char *,  size_t ,  uint32_t ,
 
 bool
 EvOmmClient::connect( EvOmmClientParameters &p,  EvConnectionNotify *n,
-                      OmmClientCB *c,  SourceDB *db ) noexcept
+                      OmmClientCB *c ) noexcept
 {
   char * daemon = NULL, buf[ 256 ];
   int port = p.port;
@@ -72,7 +72,7 @@ EvOmmClient::connect( EvOmmClientParameters &p,  EvConnectionNotify *n,
   }
   if ( EvTcpConnection::connect( *this, daemon, port, p.opts ) != 0 )
     return false;
-  this->init( db );
+  this->init_streams();
   this->notify      = n;
   this->cb          = c;
   this->app_name    = p.app_name;
@@ -148,24 +148,46 @@ EvOmmClient::process( void ) noexcept
 bool
 EvOmmClient::dispatch_msg( IpcHdr &ipc,  char *buf ) noexcept
 {
-  char * msg = &buf[ ipc.header_len ];
-  size_t len = ipc.ipc_len - ipc.header_len;
-  MDOutput mout;
+  /* mormal messages are:
+   * [ header ] [ data : next_off - header_len ]
+   * msgs can be packed, the for loop advances header_len to next pack len:
+   * [ header ] [ pack len ] [ data ] [ pack len ] [ data ]
+   */
+  for (;;) {
+    char * msg = &buf[ ipc.header_len ];
+    size_t len = ipc.next_off - ipc.header_len;
+    ipc.header_len = ipc.next_off;
 
-  if ( len == 0 ) /* ping msg */
-    return true;
-  if ( is_omm_debug ) {
-    ipc.print( buf );
-    printf( "message:\n" );
-    mout.print_hex( msg, len );
-  }
-  if ( ipc.frag_id != 0 && len != ipc.extended_len ) {
-    if ( ! this->ipc_fragment.merge( ipc.frag_id, ipc.extended_len, msg, len ) )
-      return true;
-  }
-  if ( ipc.is_conn_ack() ) {
-    ServerInitRec rec;
-    if ( rec.unpack( buf, ipc.ipc_len ) ) {
+    while ( len == 0 ) { /* ping msgs are zero length */
+      if ( ipc.next_off + 2 >= ipc.ipc_len )
+        return true;
+      size_t pack_len = ( (size_t) ((uint8_t *) buf)[ ipc.next_off ] << 8 ) |
+                          (size_t) ((uint8_t *) buf)[ ipc.next_off + 1 ];
+      ipc.header_len += 2;
+      ipc.next_off = ipc.header_len + pack_len;
+      if ( ipc.next_off > ipc.ipc_len ) /* should error */
+        return true;
+      msg = &buf[ ipc.header_len ];
+      len = ipc.next_off - ipc.header_len;
+      ipc.header_len = ipc.next_off;
+    }
+
+    if ( is_omm_debug ) {
+      MDOutput mout;
+      printf( "message:\n" );
+      mout.print_hex( msg, len );
+    }
+
+    if ( ipc.frag_id != 0 && len != ipc.extended_len ) {
+      if ( ! this->ipc_fragment.merge( ipc.frag_id, ipc.extended_len,
+                                       msg, len ) )
+        continue;
+    }
+
+    if ( ipc.is_conn_ack() ) {
+      ServerInitRec rec;
+      if ( ! rec.unpack( buf, ipc.ipc_len ) )
+        return false;
       if ( is_omm_debug )
         printf( "connack, rssl_flags %u ping_timeout %u max_msg_size %u\n",
           rec.rssl_flags, rec.ping_timeout, rec.max_msg_size );
@@ -179,46 +201,43 @@ EvOmmClient::dispatch_msg( IpcHdr &ipc,  char *buf ) noexcept
       this->poll.timer.add_timer_millis( this->fd, rec.ping_timeout * 1000 / 2,
                                          PING_TIMER_ID, PING_TIMER_EVENT );
       this->send_login_request();
-      return true;
+      continue;
     }
-    return false;
-  }
 
-  if ( ipc.is_data() ) {
-    MDMsgMem mem;
-    RwfMsg * m = RwfMsg::unpack_message( msg, 0, len, RWF_MSG_TYPE_ID,
-                                         this->dict.rdm_dict, mem );
-    if ( m == NULL )
-      return false;
+    if ( ipc.is_data() ) {
+      MDMsgMem mem;
+      RwfMsg * m = RwfMsg::unpack_message( msg, 0, len, RWF_MSG_TYPE_ID,
+                                           this->dict.rdm_dict, mem );
+      if ( m == NULL )
+        return false;
 
-    switch ( m->msg.stream_id ) {
-      case login_stream_id:
-        this->recv_login_response( *m );
-        this->send_directory_request();
-        break;
-      case dictionary_stream_id:
-      case enumdefs_stream_id:
-        this->recv_dictionary_response( *m );
-        if ( 0 ) {
-      case directory_stream_id:
-          this->recv_directory_response( *m );
-          if ( ! this->have_dictionary && ! this->no_dictionary )
-            this->send_dictionary_request();
-        }
-        if ( this->dict_in_progress == NULL ) {
-          if ( this->notify != NULL )
-            this->notify->on_connect( *this );
-          this->EvOmmConn::sub_route.add_route_notify( *this );
-        }
-        break;
-      default:
-        this->forward_msg( *m );
-        /*if ( this->cb != NULL )
-          this->cb->on_msg( *m );*/
-        break;
+      switch ( m->msg.stream_id ) {
+        case login_stream_id:
+          this->recv_login_response( *m );
+          this->send_directory_request();
+          break;
+        case dictionary_stream_id:
+        case enumdefs_stream_id:
+          this->recv_dictionary_response( *m );
+          if ( 0 ) {
+        case directory_stream_id:
+            this->recv_directory_response( *m );
+            if ( ! this->have_dictionary && ! this->no_dictionary )
+              this->send_dictionary_request();
+          }
+          if ( this->dict_in_progress == NULL ) {
+            if ( this->notify != NULL )
+              this->notify->on_connect( *this );
+            this->EvOmmConn::sub_route.add_route_notify( *this );
+          }
+          break;
+        default:
+          this->forward_msg( *m );
+          break;
+      }
     }
+    /* otherwise, what is ipc? */
   }
-  return true;
 }
 
 void

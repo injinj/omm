@@ -57,6 +57,7 @@ struct LoginInfo {
   /* support_enhanced_symbol_list, watch individual symbols */
   /* other authn related fields */
   void * operator new( size_t, void *ptr ) { return ptr; }
+  void operator delete( void *ptr ) { ::free( ptr ); }
   LoginInfo( uint32_t id ) {
     ::memset( (void *) this, 0, sizeof( *this ) );
     this->stream_id = id;
@@ -226,6 +227,7 @@ struct ServiceLinkInfo {
   char    text[ MAX_OMM_STRLEN ];
 
   void * operator new( size_t, void *ptr ) { return ptr; }
+  void operator delete( void *ptr ) { ::free( ptr ); }
   ServiceLinkInfo() { this->zero(); }
   size_t iter_map( MDIterMap *mp ) {
     size_t n = 0;
@@ -238,8 +240,8 @@ struct ServiceLinkInfo {
   void zero( void ) { ::memset( (void *) this, 0, sizeof( *this ) ); }
 };
 
-struct Source {
-  Source          * next,
+struct OmmSource {
+  OmmSource       * next,
                   * back;
   uint64_t          origin;
   uint32_t          service_id,
@@ -253,7 +255,8 @@ struct Source {
   uint32_t          link_cnt;
 
   void * operator new( size_t, void *ptr ) { return ptr; }
-  Source( uint64_t orig,  uint32_t id )
+  void operator delete( void *ptr ) { ::free( ptr ); }
+  OmmSource( uint64_t orig,  uint32_t id )
     : next( 0 ), back( 0 ), origin( orig ), service_id( id ),
       filter( 0 ), link_cnt( 0 ) {
     for ( size_t i = 0; i < MAX_LINKS; i++ )
@@ -282,22 +285,21 @@ struct SourceRoute {
   uint16_t   service_cnt;
   uint8_t    domain;
   uint16_t   len;
-  char       value[ 2 ];
+  char       value[ 2 ]; /* FEED.REC, FEED.MBO, ... */
 };
 
-typedef struct kv::DLinkList<Source> SourceList;
+typedef struct kv::DLinkList<OmmSource> SourceList;
 
-struct SourceDB {
-  kv::RouteVec<SourceRoute>     domain_tab;
+struct OmmSourceDB {
+  kv::RouteVec<SourceRoute>     source_sector_tab;
   kv::ArrayCount<SourceList, 4> source_list;
   kv::UIntHashTab             * service_ht;
 
-  void * operator new( size_t, void *ptr ) { return ptr; }
-  SourceDB() : service_ht( 0 ) {
+  OmmSourceDB() : service_ht( 0 ) {
     this->service_ht = kv::UIntHashTab::resize( NULL );
   }
 
-  void add_source( Source *src ) {
+  void add_source( OmmSource *src ) {
     size_t   pos;
     uint32_t i;
     if ( this->service_ht->find( src->service_id, pos, i ) ) {
@@ -310,11 +312,11 @@ struct SourceDB {
     list.push_tl( src );
     this->service_ht->set_rsz( this->service_ht, src->service_id, pos, i );
   }
-  Source * find_source( uint32_t service_id,  uint64_t origin ) {
+  OmmSource * find_source( uint32_t service_id,  uint64_t origin ) {
     size_t   pos;
     uint32_t i;
     if ( this->service_ht->find( service_id, pos, i ) ) {
-      Source * src = this->source_list.ptr[ i ].hd;
+      OmmSource * src = this->source_list.ptr[ i ].hd;
       while ( src != NULL ) {
         if ( origin == 0 || src->origin == origin )
           return src;
@@ -323,17 +325,19 @@ struct SourceDB {
     }
     return NULL;
   }
-  void update_source_map( uint64_t origin,  RwfMsg &map ) noexcept;
-  void update_source_entry( uint64_t origin,  uint32_t service_id,
+  void drop_sources( uint64_t origin ) noexcept;
+  uint32_t update_source_map( uint64_t origin,  RwfMsg &map ) noexcept;
+  bool update_source_entry( uint64_t origin,  uint32_t service_id,
                             RwfMsg &entry ) noexcept;
-  void update_service_info( uint64_t origin,  uint32_t service_id,
+  bool update_service_info( uint64_t origin,  uint32_t service_id,
                             uint32_t info_id,  bool is_filter_update,
                             RwfMsg &info ) noexcept;
   void clear_service_info( uint64_t origin,  uint32_t service_id,
                            uint32_t info_id ) noexcept;
   void index_domains( void ) noexcept;
-  Source * match_sub( const char *&sub,  size_t &len,
-                      uint8_t &domain,  uint64_t origin ) noexcept;
+  OmmSource * match_sub( const char *&sub,  size_t &len,
+                         uint8_t &domain,  uint64_t origin ) noexcept;
+  void print_sources( void ) noexcept;
 };
 
 static inline size_t rdm_sector_strlen( const char *sector ) {

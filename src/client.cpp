@@ -453,7 +453,8 @@ main( int argc, const char *argv[] )
 
   EvOmmClientParameters param( host, app_nm, app_id, user, pass, inst, token );
   OmmDict               dict;
-  EvOmmClient           conn( poll, dict );
+  OmmSourceDB           source_db;
+  EvOmmClient           conn( poll, dict, source_db );
   OmmDataCallback       data( poll, conn, &argv[ first_sub ], argc - first_sub,
                               dump != NULL, rate != NULL, cnt, range,
                               zipf != NULL, secs, quiet != NULL, seed1, seed2 );
