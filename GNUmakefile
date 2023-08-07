@@ -114,6 +114,7 @@ test_makefile = $(shell if [ -f ./$(1)/GNUmakefile ] ; then echo ./$(1) ; \
 md_home     := $(call test_makefile,raimd)
 dec_home    := $(call test_makefile,libdecnumber)
 kv_home     := $(call test_makefile,raikv)
+sassrv_home := $(call test_makefile,sassrv)
 
 ifeq (,$(dec_home))
 dec_home    := $(call test_makefile,$(md_home)/libdecnumber)
@@ -168,11 +169,25 @@ lnk_lib     += $(push_static) -lraikv $(pop_static)
 dlnk_lib    += -lraikv
 endif
 
-rpath   := -Wl,-rpath,$(pwd)/$(libd)$(rpath1)$(rpath2)$(rpath3)
+ifneq (,$(sassrv_home))
+sassrv_lib  := $(sassrv_home)/$(libd)/libsassrv.a
+sassrv_dll  := $(sassrv_home)/$(libd)/libsassrv.$(dll)
+lnk_lib     += $(sassrv_lib)
+lnk_dep     += $(sassrv_lib)
+dlnk_lib    += -L$(sassrv_home)/$(libd) -lsassrv
+dlnk_dep    += $(sassrv_dll)
+rpath4       = ,-rpath,$(pwd)/$(sassrv_home)/$(libd)
+sassrv_includes = -I$(sassrv_home)/include
+else
+lnk_lib     += -lsassrv
+dlnk_lib    += -lsassrv
+endif
+
+rpath   := -Wl,-rpath,$(pwd)/$(libd)$(rpath1)$(rpath2)$(rpath3)$(rpath4)
 lnk_lib += -Wl,--pop-state
 
 .PHONY: everything
-everything: $(kv_lib) $(dec_lib) $(md_lib) all
+everything: $(kv_lib) $(dec_lib) $(md_lib) $(sassrv_lib) all
 
 clean_subs :=
 # build submodules if have them
@@ -238,13 +253,15 @@ all_depends += $(libomm_deps)
 omm_lib   := $(libd)/libomm.a
 
 server_defines := -DOMM_VER=$(ver_build)
+server_includes := $(sassrv_includes)
+rv_submgr_includes := $(sassrv_includes)
 $(objd)/server.o : .copr/Makefile
 $(objd)/server.fpic.o : .copr/Makefile
-omm_server_files := server test_pub
+omm_server_files := server test_pub rv_submgr
 omm_server_cfile := $(addprefix src/, $(addsuffix .cpp, $(omm_server_files)))
 omm_server_objs  := $(addprefix $(objd)/, $(addsuffix .o, $(omm_server_files)))
 omm_server_deps  := $(addprefix $(dependd)/, $(addsuffix .d, $(omm_server_files)))
-omm_server_libs  := $(omm_lib)
+omm_server_libs  := $(omm_lib) $(sassrv_lib)
 omm_server_lnk   := $(omm_lib) $(lnk_lib)
 
 $(bind)/omm_server$(exe): $(omm_server_objs) $(omm_server_libs) $(lnk_dep)

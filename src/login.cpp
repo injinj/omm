@@ -118,6 +118,7 @@ EvOmmClient::add_login_request_attrs( RwfElementListWriter &elist ) noexcept
 
   elist.append_uint( PROV_PERM_PROF, 1 ) /* dacs */
        .append_uint( PROV_PERM_EXPR, 1 )
+       .append_uint( SUP_PROV_DICT , 1 ) /* support provider dictionary */
        .append_uint( SINGLE_OPEN   , 1 ) /* consumer drives */
        .append_uint( ALLOW_SUSPECT , 1 );/* has stream state */
   /* other options default to zero */

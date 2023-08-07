@@ -22,7 +22,7 @@ TestPublish::start( void ) noexcept
 {
   this->omm_sv.x_source_db.print_sources();
   this->omm_sv.sub_route.add_route_notify( *this );
-  this->poll.timer.add_timer_seconds( *this, 1, 1, 0 );
+  this->poll.timer.add_timer_seconds( *this, 5, 1, 0 );
 }
 
 void
@@ -101,9 +101,9 @@ TestPublish::add_test_source( const char *feed_name,
 void
 TestRoute::init( uint64_t cur_ns ) noexcept
 {
-  this->seqno = 1;
-  this->ask.set( 1015, MD_DEC_LOGn10_1 );
-  this->bid.set( 1005, MD_DEC_LOGn10_1 );
+  this->seqno = 0;
+  this->ask.set( 1025, MD_DEC_LOGn10_2 );
+  this->bid.set( 1050, MD_DEC_LOGn10_2 );
   this->ask_size.set( 100, MD_DEC_INTEGER );
   this->bid_size.set( 50, MD_DEC_INTEGER );
   this->is_active = false;
@@ -131,16 +131,12 @@ TestRoute::update_time( uint64_t cur_ns ) noexcept
 void
 TestRoute::update( uint64_t cur_ns ) noexcept
 {
-  uint64_t no = this->seqno;
-  this->ask.ival++;
-  this->bid.ival++;
+  this->ask.ival += 25;
+  this->bid.ival += 25;
   this->ask_size.ival += 10;
-  this->bid_size.ival += 10;
-  if ( this->ask.ival > 1060 )
-    this->init( cur_ns );
-  else
-    this->update_time( cur_ns );
-  this->seqno = no + 1;
+  this->bid_size.ival += 5;
+  this->update_time( cur_ns );
+  this->seqno++;
 }
 
 static const char msg_type[]   = "MSG_TYPE",
@@ -161,6 +157,14 @@ TestPublish::on_sub( kv::NotifySub &sub ) noexcept
              (int) sub.subject_len, sub.subject );
     return;
   }
+  const char * ric     = sub.subject;
+  size_t       ric_len = sub.subject_len;
+  OmmSource  * src;
+  uint8_t      domain  = MARKET_PRICE_DOMAIN;
+
+  if ( (src = this->source_db.match_sub( ric, ric_len, domain, 0 )) == NULL )
+    return;
+
   RouteLoc    loc;
   TestRoute * rt = this->test_tab.upsert( sub.subj_hash, sub.subject,
                                           sub.subject_len, loc );
@@ -172,15 +176,16 @@ TestPublish::on_sub( kv::NotifySub &sub ) noexcept
     rt->is_active = true;
   }
 
-  const char * ric     = sub.subject;
-  size_t       ric_len = sub.subject_len;
-  OmmSource  * src;
-  uint8_t      domain  = MARKET_PRICE_DOMAIN;
+  if ( sub.is_notify_initial() )
+    this->initial( sub.reply, sub.reply_len, src, ric, ric_len, domain, rt,
+                   true );
+}
 
-  if ( (src = this->source_db.match_sub( ric, ric_len, domain, 0 )) == NULL )
-    return;
-
-  this->initial( src, ric, ric_len, domain, rt, true );
+void
+TestPublish::on_resub( kv::NotifySub &sub ) noexcept
+{
+  if ( sub.is_notify_initial() )
+    this->on_sub( sub );
 }
 
 void
@@ -197,8 +202,9 @@ TestPublish::on_unsub( kv::NotifySub &sub ) noexcept
 }
 
 void
-TestPublish::initial( OmmSource *src,  const char *ric,  size_t ric_len,
-                      uint8_t domain,  TestRoute *rt,  bool is_solicited ) noexcept
+TestPublish::initial( const char *reply,  size_t reply_len,  OmmSource *src,
+                      const char *ric,  size_t ric_len,  uint8_t domain,
+                      TestRoute *rt,  bool is_solicited ) noexcept
 {
   char buf[ 1024 ];
   MDMsgMem mem;
@@ -208,12 +214,14 @@ TestPublish::initial( OmmSource *src,  const char *ric,  size_t ric_len,
     msg.set( X_CLEAR_CACHE, X_SOLICITED, X_REFRESH_COMPLETE );
   else
     msg.set( X_CLEAR_CACHE, X_REFRESH_COMPLETE );
-  msg.add_msg_key()
+  msg.add_seq_num( rt->seqno )
+     .add_msg_key()
      .service_id( src->service_id )
      .name( ric, ric_len )
      .name_type( NAME_TYPE_RIC )
      .end_msg_key();
   msg.add_field_list()
+     .add_flist( 90 )
      .append_int    ( msg_type   , 8 )
      .append_int    ( seq_no     , rt->seqno )
      .append_string ( rec_status , "OK" )
@@ -225,7 +233,12 @@ TestPublish::initial( OmmSource *src,  const char *ric,  size_t ric_len,
      .append_time   ( timact     , rt->time )
      .append_date   ( trade_date , rt->date )
      .end_msg();
-  EvPublish pub( rt->value, rt->len, NULL, 0, msg.buf, msg.off,
+  if ( reply_len == 0 ) {
+    reply     = rt->value;
+    reply_len = rt->len;
+  }
+  printf( "pub initial %.*s\n", (int) reply_len, reply );
+  EvPublish pub( reply, reply_len, NULL, 0, msg.buf, msg.off,
                  this->poll.sub_route, this->omm_sv, rt->hash,
                  RWF_MSG_TYPE_ID );
   this->poll.sub_route.forward_msg( pub, NULL );
@@ -239,13 +252,15 @@ TestPublish::update( OmmSource *src,  const char *ric,  size_t ric_len,
   MDMsgMem mem;
   RwfMsgWriter msg( mem, this->dict.rdm_dict, buf, sizeof( buf ),
                     UPDATE_MSG_CLASS, (RdmDomainType) domain, rt->hash );
-  msg.add_msg_key()
+  msg.add_seq_num( rt->seqno )
+     .add_msg_key()
      .service_id( src->service_id )
      .name( ric, ric_len )
      .name_type( NAME_TYPE_RIC )
      .end_msg_key();
   msg.add_update( UPD_TYPE_QUOTE )
      .add_field_list()
+     .add_flist( 90 )
      .append_int    ( msg_type   , 1 )
      .append_int    ( seq_no     , rt->seqno )
      .append_string ( rec_status , "OK" )
@@ -282,7 +297,7 @@ TestPublish::timer_cb( uint64_t, uint64_t ) noexcept
       continue;
 
     if ( rt->seqno % 30 == 0 )
-      this->initial( src, ric, ric_len, domain, rt, false );
+      this->initial( NULL, 0, src, ric, ric_len, domain, rt, false );
     else
       this->update( src, ric, ric_len, domain, rt );
   }

@@ -133,7 +133,7 @@ EvOmmService::recv_directory_request( RwfMsg &msg ) noexcept
 }
 
 RwfMapWriter &
-EvOmmService::add_source_dirs( md::RwfMapWriter &map,
+EvOmmService::add_source_dirs( RwfMapWriter &map,
                                uint32_t filter ) noexcept
 {
   const char * dict[ MAX_DICTIONARIES ];

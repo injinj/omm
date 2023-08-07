@@ -393,6 +393,7 @@ struct DictInProg {
   DictInProg() : fld_dict_name( 0 ), enum_dict_name( 0 ),
                  field_stream_id( 0 ), enum_stream_id( 0 ),
                  dict_in_progress( 0 ) {}
+  ~DictInProg() noexcept;
 };
 
 void print_dict_info( MDDict *d,  const char *fld_dict_name,

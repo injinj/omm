@@ -229,7 +229,7 @@ EvOmmService::timer_expire( uint64_t, uint64_t ) noexcept
   /* send ping */
   static const uint8_t ping[ 3 ] = { 0, 3, IPC_DATA };
   this->append( ping, sizeof( ping ) );
-  this->idle_push( EV_WRITE );
+  this->idle_push_write();
   return true;
 }
 

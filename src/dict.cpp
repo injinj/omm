@@ -134,11 +134,15 @@ EvOmmClient::recv_dictionary_response( RwfMsg &msg ) noexcept
       p->dict_build.index_dict( "app_a", this->dict.rdm_dict );
       print_dict_info( this->dict.rdm_dict, p->fld_dict_name,
                        p->enum_dict_name );
-      p->dict_build.clear_build();
       this->dict_in_progress = NULL;
       delete p;
     }
   }
+}
+
+DictInProg::~DictInProg() noexcept
+{
+  this->dict_build.clear_build();
 }
 
 void

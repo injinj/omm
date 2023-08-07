@@ -16,40 +16,50 @@ using namespace md;
 using namespace omm;
 
 bool
-EvOmmClient::send_subscribe( const char *sub,  size_t sub_len ) noexcept
+EvOmmClient::send_subscribe( const char *sub,  size_t sub_len,
+                             bool is_initial ) noexcept
 {
   RouteLoc     loc;
   OmmSource  * src;
   OmmRoute   * rt;
   const char * ric     = sub;
   size_t       ric_len = sub_len;
+  uint32_t     stream_id,
+               h       = kv_crc_c( sub, sub_len, 0 );
   uint8_t      domain  = MARKET_PRICE_DOMAIN;
 
   if ( (src = this->source_db.match_sub( ric, ric_len, domain,
                                          this->start_ns )) == NULL )
     return false;
-  uint32_t stream_id, h = kv_crc_c( sub, sub_len, 0 );
 
   rt = this->sub_tab.upsert( h, sub, sub_len, loc );
-  rt->is_solicited = true;
   if ( loc.is_new ) {
     stream_id      = this->next_stream_id++;
     rt->service_id = src->service_id;
     rt->domain     = domain;
     rt->stream_id  = stream_id;
     rt->msg_cnt    = 0;
-
+    if ( is_initial )
+      rt->is_solicited = true;
+    else
+      rt->is_solicited = false;
     this->stream_ht->upsert_rsz( this->stream_ht, stream_id, h );
   }
   else {
+    if ( ! is_initial ) /* already subscribed */
+      return true;
+    rt->is_solicited = true;
     stream_id = rt->stream_id;
   }
-
   TempBuf      temp_buf = this->mktemp( 128 );
   MDMsgMem     mem;
   RwfMsgWriter msg( mem, NULL, temp_buf.msg, temp_buf.len,
                     REQUEST_MSG_CLASS, (RdmDomainType) domain, stream_id );
-  msg.set( X_STREAMING )
+  msg.set( X_STREAMING );
+  if ( ! rt->is_solicited )
+    msg.set( X_NO_REFRESH );
+  msg.add_priority( 1, 1 )
+     .add_qos( src->info.qos[ 0 ] )
      .add_msg_key()
        .service_id( src->service_id )
        .name( ric, ric_len )
@@ -61,6 +71,36 @@ EvOmmClient::send_subscribe( const char *sub,  size_t sub_len ) noexcept
 }
 
 bool
+EvOmmClient::send_snapshot( const char *sub,  size_t sub_len ) noexcept
+{
+  OmmSource  * src;
+  const char * ric     = sub;
+  size_t       ric_len = sub_len;
+  uint32_t     stream_id;
+  uint8_t      domain  = MARKET_PRICE_DOMAIN;
+
+  if ( (src = this->source_db.match_sub( ric, ric_len, domain,
+                                         this->start_ns )) == NULL )
+    return false;
+  stream_id = this->next_stream_id++;
+
+  TempBuf      temp_buf = this->mktemp( 128 );
+  MDMsgMem     mem;
+  RwfMsgWriter msg( mem, NULL, temp_buf.msg, temp_buf.len,
+                    REQUEST_MSG_CLASS, (RdmDomainType) domain, stream_id );
+  msg.add_priority( 1, 1 )
+     .add_qos( src->info.qos[ 0 ] )
+     .add_msg_key()
+       .service_id( src->service_id )
+       .name( ric, ric_len )
+       .name_type( NAME_TYPE_RIC )
+  .end_msg();
+
+  this->send_msg( "snapshot", msg, temp_buf );
+  return true;
+}
+
+bool
 EvOmmClient::send_unsubscribe( const char *sub,  size_t sub_len ) noexcept
 {
   RouteLoc     loc;
@@ -68,16 +108,14 @@ EvOmmClient::send_unsubscribe( const char *sub,  size_t sub_len ) noexcept
   OmmRoute   * rt;
   const char * ric     = sub;
   size_t       ric_len = sub_len;
+  uint32_t     h       = kv_crc_c( sub, sub_len, 0 );
   uint8_t      domain  = MARKET_PRICE_DOMAIN;
 
   if ( (src = this->source_db.match_sub( ric, ric_len, domain,
                                          this->start_ns )) == NULL )
     return false;
   
-  uint32_t h = kv_crc_c( sub, sub_len, 0 );
-  rt = this->sub_tab.find( h, sub, sub_len, loc );
-
-  if ( rt == NULL )
+  if ( (rt = this->sub_tab.find( h, sub, sub_len, loc )) == NULL )
     return false;
 
   TempBuf      temp_buf = this->mktemp( 128 );
@@ -111,7 +149,7 @@ EvOmmClient::forward_msg( RwfMsg &msg ) noexcept
     if ( this->cb == NULL )
       this->publish_msg( msg, sub_rt );
     else
-      this->cb->on_msg( sub_rt.rt->value, sub_rt.rt->len, sub_rt.hash, msg );
+      this->cb->on_omm_msg( sub_rt.rt->value, sub_rt.rt->len, sub_rt.hash, msg);
   }
 }
 
@@ -123,15 +161,14 @@ EvOmmConn::on_msg( EvPublish &pub ) noexcept
   if ( rt == NULL )
     return true;
 
-  if ( pub.msg_enc == RWF_MSG_TYPE_ID && pub.msg_len > 10 ) {
-    if ( ((uint8_t *) pub.msg)[ 2 ] == REFRESH_MSG_CLASS ) {
-      uint16_t msg_flags = 0;
-      get_u15_prefix( &((uint8_t *) pub.msg)[ 8 ],
-                      &((uint8_t *) pub.msg)[ pub.msg_len ], msg_flags );
-      if ( ( msg_flags & 0x20 ) != 0 ) {
+  if ( pub.msg_enc == RWF_MSG_TYPE_ID ) {
+    uint8_t msg_class = RwfMsgPeek::get_msg_class( pub.msg, pub.msg_len );
+    if ( msg_class == REFRESH_MSG_CLASS ) {
+      uint16_t msg_flags = RwfMsgPeek::get_msg_flags( pub.msg, pub.msg_len );
+      if ( ( msg_flags & RWF_REFRESH_SOLICITED ) != 0 ) {
         if ( ! rt->is_solicited )
           return true;
-        rt->is_solicited = false; /* only let one solicitied msg through */
+        rt->is_solicited = false;
       }
     }
     rt->msg_cnt++;
@@ -148,7 +185,7 @@ EvOmmConn::on_msg( EvPublish &pub ) noexcept
       buf[ 2 ] = IPC_DATA;
       this->sz += len;
     }
-    this->idle_push( EV_WRITE );
+    this->idle_push_write();
   }
   return true;
 }
@@ -295,12 +332,15 @@ EvOmmService::process_msg( RwfMsg &msg ) noexcept
                          "No service id route" );
       return;
     }
-    if ( ! this->add_subj_stream( hdr, subj, sub_rt ) )
+    if ( ! this->add_subj_stream( hdr, subj, sub_rt ) ) {
       this->send_status( msg, STATUS_CODE_ALREADY_OPEN, "Already subscribed" );
-
-    sub_rt.rt->is_solicited = true;
+      return;
+    }
     NotifySub nsub( subj.sub, subj.sub_len, NULL, 0, subj.hash,
                     sub_rt.hcnt > 0, 'O', *this );
+
+    sub_rt.rt->is_solicited = true;
+    nsub.notify_type = NOTIFY_IS_INITIAL;
     if ( sub_rt.loc.is_new ) {
       this->sub_route.add_sub( nsub );
     }
@@ -346,16 +386,26 @@ EvOmmConn::publish_msg( RwfMsg &msg,  OmmSubjRoute &sub_rt ) noexcept
 }
 
 void
-EvOmmClient::on_sub( kv::NotifySub &sub ) noexcept
+EvOmmClient::on_sub( NotifySub &sub ) noexcept
 {
-  this->send_subscribe( sub.subject, sub.subject_len );
+  this->send_subscribe( sub.subject, sub.subject_len,
+                        sub.is_notify_initial() );
+  this->idle_push_write();
+}
+
+void
+EvOmmClient::on_resub( NotifySub &sub ) noexcept
+{
+  this->on_sub( sub );
 }
 
 void
 EvOmmClient::on_unsub( kv::NotifySub &sub ) noexcept
 {
-  if ( sub.sub_count == 0 )
+  if ( sub.sub_count == 0 ) {
     this->send_unsubscribe( sub.subject, sub.subject_len );
+    this->idle_push_write();
+  }
 }
 
 void

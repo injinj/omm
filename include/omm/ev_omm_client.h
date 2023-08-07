@@ -28,15 +28,25 @@ struct EvOmmClientParameters {
 struct EvOmmClient;
 struct OmmClientCB {
   OmmClientCB() {}
-  virtual bool on_msg( const char *sub,  size_t sub_len,  uint32_t subj_hash,
-                       md::RwfMsg &msg ) noexcept;
+  virtual bool on_omm_msg( const char *sub,  size_t sub_len,  uint32_t subj_hash,
+                           md::RwfMsg &msg ) noexcept;
 };
 
 struct LoginInfo;
 struct OmmSourceDB;
 struct DictInProg;
 struct IpcFrag;
-
+#if 0
+struct ReplyElem {
+  ReplyElem * next;
+  uint16_t    reply_len;
+  char        reply[ 6 ];
+  static ReplyElem * make_reply_elem( const char *reply,
+                                      uint16_t reply_len ) noexcept;
+};
+typedef kv::SLinkList<ReplyElem> ReplyList;
+typedef kv::IntHashTabT<uint32_t, ReplyList> ReplyHT;
+#endif
 struct EvOmmClient : public EvOmmConn, public kv::RouteNotify {
   static const uint32_t login_stream_id      = 1,
                         directory_stream_id  = 2,
@@ -79,11 +89,13 @@ struct EvOmmClient : public EvOmmConn, public kv::RouteNotify {
   bool recv_login_response( md::RwfMsg &msg ) noexcept;
   void recv_directory_response( md::RwfMsg &msg ) noexcept;
   void recv_dictionary_response( md::RwfMsg &msg ) noexcept;
-  bool send_subscribe( const char *sub,  size_t len ) noexcept;
+  bool send_subscribe( const char *sub,  size_t len, bool is_initial ) noexcept;
+  bool send_snapshot( const char *sub,  size_t len ) noexcept;
   bool send_unsubscribe( const char *sub,  size_t len ) noexcept;
   void forward_msg( md::RwfMsg &msg ) noexcept;
 
   virtual void on_sub( kv::NotifySub &sub ) noexcept;
+  virtual void on_resub( kv::NotifySub &sub ) noexcept;
   virtual void on_unsub( kv::NotifySub &sub ) noexcept;
   virtual void on_psub( kv::NotifyPattern &pat ) noexcept;
   virtual void on_punsub( kv::NotifyPattern &pat ) noexcept;

@@ -25,8 +25,8 @@ EvOmmClient::EvOmmClient( EvPoll &p,  OmmDict &d,  OmmSourceDB &db ) noexcept
     instance_id( 0 ), token( 0 )
 {
 }
-bool OmmClientCB::on_msg( const char *,  size_t ,  uint32_t , 
-                          md::RwfMsg & ) noexcept { return true; }
+bool OmmClientCB::on_omm_msg( const char *,  size_t ,  uint32_t , 
+                              md::RwfMsg & ) noexcept { return true; }
 
 bool
 EvOmmClient::connect( EvOmmClientParameters &p,  EvConnectionNotify *n,
@@ -228,7 +228,8 @@ EvOmmClient::dispatch_msg( IpcHdr &ipc,  char *buf ) noexcept
           if ( this->dict_in_progress == NULL ) {
             if ( this->notify != NULL )
               this->notify->on_connect( *this );
-            this->EvOmmConn::sub_route.add_route_notify( *this );
+            if ( this->cb == NULL )
+              this->EvOmmConn::sub_route.add_route_notify( *this );
           }
           break;
         default:
@@ -243,7 +244,7 @@ EvOmmClient::dispatch_msg( IpcHdr &ipc,  char *buf ) noexcept
 void
 EvOmmClient::subscribe( const char *sub,  size_t len ) noexcept
 {
-  if ( ! this->send_subscribe( sub, len ) ) {
+  if ( ! this->send_subscribe( sub, len, true ) ) {
     fprintf( stderr, "no source matches %.*s\n", (int) len, sub );
   }
 }
@@ -271,6 +272,16 @@ EvOmmClient::release( void ) noexcept
   if ( is_omm_debug )
     printf( "release %.*s\n", (int) this->get_peer_address_strlen(),
             this->peer_address.buf );
+  if ( this->login != NULL ) {
+    delete this->login;
+    this->login = NULL;
+  }
+  if ( this->dict_in_progress != NULL ) {
+    delete this->dict_in_progress;
+    this->dict_in_progress = NULL;
+  }
+  if ( this->cb == NULL )
+    this->EvOmmConn::sub_route.remove_route_notify( *this );
   this->EvConnection::release_buffers();
 }
 
@@ -290,7 +301,7 @@ EvOmmClient::timer_expire( uint64_t, uint64_t ) noexcept
   /* send ping */
   static const uint8_t ping[ 3 ] = { 0, 3, IPC_DATA };
   this->append( ping, sizeof( ping ) );
-  this->idle_push( EV_WRITE );
+  this->idle_push_write();
   return true;
 }
 

@@ -17,6 +17,26 @@ static const uint32_t RATE_TIMER_SECS = 1;
 static const uint64_t RATE_TIMER_ID   = 3, /* rate timer */
                       STOP_TIMER_ID   = 4; /* stop timer */
 
+struct SubjHT {
+  UInt64HashTab * ht;
+  SubjHT() : ht( 0 ) {
+    this->ht = UInt64HashTab::resize( NULL );
+  }
+
+  bool find( const char *sub,  size_t sublen,  uint32_t &val ) {
+    uint64_t h = kv_hash_murmur64( sub, sublen, 0 ), val64;
+    size_t pos;
+    if ( ! this->ht->find( h, pos, val64 ) )
+      return false;
+    val = val64;
+    return true;
+  }
+  void upsert( const char *sub,  size_t sublen,  uint32_t val ) {
+    uint64_t h = kv_hash_murmur64( sub, sublen, 0 );
+    this->ht->upsert_rsz( this->ht, h, val );
+  }
+};
+
 struct OmmDataCallback : public EvConnectionNotify, public OmmClientCB,
                          public EvTimerCallback {
   EvPoll      & poll;            /* poll loop data */
@@ -36,8 +56,7 @@ struct OmmDataCallback : public EvConnectionNotify, public OmmClientCB,
   uint32_t    * rand_schedule,
               * msg_recv;
   size_t      * msg_recv_bytes;
-  UIntHashTab * subj_ht,
-              * coll_ht;
+  SubjHT        subj_ht;
   size_t        rand_range;
   uint32_t      max_time_secs;
   bool          use_random,
@@ -52,7 +71,7 @@ struct OmmDataCallback : public EvConnectionNotify, public OmmClientCB,
       num_subs( n ), msg_count( 0 ), last_count( 0 ), last_time( 0 ),
       msg_bytes( 0 ), last_bytes( 0 ), is_subscribed( false ), dump_hex( hex ),
       show_rate( rate ), subj_buf( 0 ), rand_schedule( 0 ), msg_recv( 0 ),
-      msg_recv_bytes( 0 ), subj_ht( 0 ), coll_ht( 0 ), rand_range( rng ),
+      msg_recv_bytes( 0 ), rand_range( rng ),
       max_time_secs( secs ), use_random( rng > cnt ), use_zipf( zipf ),
       quiet( q ) {
     this->seed1 = ( s1 == 0 ? current_monotonic_time_ns() : s1 );
@@ -81,8 +100,8 @@ struct OmmDataCallback : public EvConnectionNotify, public OmmClientCB,
   /* dict timeout */
   virtual bool timer_cb( uint64_t timer_id,  uint64_t event_id ) noexcept;
   /* message from network */
-  virtual bool on_msg( const char *sub,  size_t sub_len,
-                       uint32_t subj_hash,  RwfMsg &msg ) noexcept;
+  virtual bool on_omm_msg( const char *sub,  size_t sub_len,
+                           uint32_t subj_hash,  RwfMsg &msg ) noexcept;
 };
 
 /* called after daemon responds with CONNECTED message */
@@ -169,8 +188,6 @@ OmmDataCallback::start_subscriptions( void ) noexcept
   if ( this->is_subscribed ) /* subscribing multiple times is allowed, */
     return;                  /* but must unsub multiple times as well */
 
-  this->subj_ht = UIntHashTab::resize( NULL );
-  this->coll_ht = UIntHashTab::resize( NULL );
   size_t n   = this->sub_count * this->num_subs;
   size_t sz  = sizeof( this->msg_recv[ 0 ] ) * n,
          sz2 = sizeof( this->msg_recv_bytes[ 0 ] ) * n;
@@ -189,33 +206,7 @@ OmmDataCallback::start_subscriptions( void ) noexcept
       printf( "Subscribe \"%.*s\"\n", (int) subject_len, subject );
       /* subscribe with inbox reply */
       this->client.subscribe( subject, subject_len );
-
-      uint32_t h = kv_crc_c( subject, subject_len, 0 ), val;
-      size_t   pos;
-      if ( this->subj_ht->find( h, pos, val ) ) {
-        const char * coll_sub;
-        size_t       coll_sublen;
-        this->subj_ht->remove( pos );
-
-        this->make_subject( val, coll_sub, coll_sublen );
-        h = kv_djb( coll_sub, coll_sublen );
-        if ( ! this->coll_ht->find( h, pos ) )
-          this->coll_ht->set_rsz( this->coll_ht, h, pos, val );
-        else {
-          printf( "HT collision \"%.*s\", no update tracking\n",
-                  (int) coll_sublen, coll_sub );
-        }
-        h = kv_djb( subject, subject_len );
-        if ( ! this->coll_ht->find( h, pos ) )
-          this->coll_ht->set_rsz( this->coll_ht, h, pos, n );
-        else {
-          printf( "HT collision \"%.*s\", no update tracking\n",
-                  (int) subject_len, subject );
-        }
-      }
-      else {
-        this->subj_ht->set_rsz( this->subj_ht, h, pos, n );
-      }
+      this->subj_ht.upsert( subject, subject_len, n );
     }
     if ( n >= this->num_subs * this->sub_count )
       break;
@@ -295,21 +286,14 @@ OmmDataCallback::on_shutdown( EvSocket &conn,  const char *err,
 }
 
 bool
-OmmDataCallback::on_msg( const char *sub,  size_t sub_len,
-                         uint32_t subj_hash,  RwfMsg &msg ) noexcept
+OmmDataCallback::on_omm_msg( const char *sub,  size_t sub_len,
+                             uint32_t,  RwfMsg &msg ) noexcept
 {
   RwfMsgHdr & hdr     = msg.msg;
-  size_t      pub_len = msg.msg_end - msg.msg_off,
-              pos;
+  size_t      pub_len = msg.msg_end - msg.msg_off;
   uint32_t    val;
 
-  if ( this->subj_ht->find( subj_hash, pos, val ) ) {
-    if ( hdr.msg_class == UPDATE_MSG_CLASS )
-      this->add_update( val, pub_len );
-    else if ( hdr.msg_class == REFRESH_MSG_CLASS )
-      this->add_initial( val, pub_len );
-  }
-  else if ( this->coll_ht->find( kv_djb( sub, sub_len ), pos, val ) ) {
+  if ( this->subj_ht.find( sub, sub_len, val ) ) {
     if ( hdr.msg_class == UPDATE_MSG_CLASS )
       this->add_update( val, pub_len );
     else if ( hdr.msg_class == REFRESH_MSG_CLASS )
