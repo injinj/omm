@@ -13,12 +13,14 @@ BuildRequires:  gcc-c++
 BuildRequires:  chrpath
 BuildRequires:  raikv
 BuildRequires:  raimd
+BuildRequires:  sassrv
 BuildRequires:  libdecnumber
 BuildRequires:  pcre2-devel
 BuildRequires:  git-core
 BuildRequires:  c-ares-devel
 Requires:       raikv
 Requires:       raimd
+Requires:       sassrv
 Requires:       libdecnumber
 Requires:       pcre2
 Requires:       c-ares

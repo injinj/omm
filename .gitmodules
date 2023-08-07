@@ -4,3 +4,6 @@
 [submodule "raikv"]
 	path = raikv
 	url = https://github.com/raitechnology/raikv
+[submodule "sassrv"]
+	path = sassrv
+	url = https://github.com/raitechnology/sassrv
