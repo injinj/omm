@@ -22,9 +22,11 @@ struct DictInProg;
 struct IpcFrag;
 
 struct OmmDict {
-  md::MDDict * rdm_dict,
+  md::MDDict * dict,
+             * flist_dict,
+             * rdm_dict,
              * cfile_dict;
-  OmmDict() : rdm_dict( 0 ), cfile_dict( 0 ) {}
+  OmmDict() : dict( 0 ), flist_dict( 0 ), rdm_dict( 0 ), cfile_dict( 0 ) {}
   bool load_cfiles( const char *cfile_path ) noexcept;
 };
 

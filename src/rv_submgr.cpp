@@ -14,6 +14,8 @@
 #include <raimd/md_msg.h>
 #include <raimd/tib_msg.h>
 #include <raimd/tib_sass_msg.h>
+#include <raimd/sass.h>
+#include <raimd/app_a.h>
 
 using namespace rai;
 using namespace kv;
@@ -21,15 +23,89 @@ using namespace sassrv;
 using namespace omm;
 using namespace md;
 
+static const char *pref[] = {
+  "_TIC.",
+  "_TIB.",
+  "_RVM.",
+  "_RWF."
+};
+static const size_t FMT_PREF_LEN = 5;
+
+enum {
+  SASS_PREFIX    = 0,
+  TIBMSG_PREFIX  = 1,
+  RVMSG_PREFIX   = 2,
+  RWFMSG_PREFIX  = 3
+};
+static inline int pref_match( const Subscription &s,
+                              const char *&sub,  size_t &sublen,
+                              uint32_t &h ) {
+  const char * val = s.value;
+  sub    = &val[ FMT_PREF_LEN ];
+  sublen = s.len - FMT_PREF_LEN;
+  h      = kv_crc_c( sub, sublen, 0 );
+  switch ( val[ 3 ] ) {
+    default:
+    case 'C': return SASS_PREFIX;
+    case 'B': return TIBMSG_PREFIX;
+    case 'M': return RVMSG_PREFIX;
+    case 'F': return RWFMSG_PREFIX;
+  }
+}
+
+static const uint32_t fmt_type_id[] = {
+  TIB_SASS_TYPE_ID,
+  TIBMSG_TYPE_ID,
+  RVMSG_TYPE_ID,
+  RWF_MSG_TYPE_ID
+};
+
 RvOmmSubmgr::RvOmmSubmgr( kv::EvPoll &p,  sassrv::EvRvClient &c,
                           OmmDict &d ) noexcept
   : EvSocket( p, p.register_type( "omm_submgr" ) ),
-    client( c ), sub_db( c, this ), dict( d ), sub( 0 ), sub_count( 0 ),
-    is_subscribed( false )
+    client( c ), sub_route( c.sub_route ), sub_db( c, this ), dict( d ),
+    coll_ht( 0 ), sub( 0 ), sub_count( 0 ), is_subscribed( false )
 {
   c.fwd_all_msgs = 0;
   this->sock_opts = OPT_NO_POLL;
 }
+
+struct FmtSub {
+  char * value;
+  size_t len;
+  char   buf[ 256 ];
+
+  FmtSub() { this->value = this->buf; }
+  FmtSub( int fmt,  const char *s,  size_t l ) {
+    this->value = this->buf;
+    this->set( fmt, s, l );
+  }
+  FmtSub( int fmt,  const Subscription &sub ) {
+    this->value = this->buf;
+    this->set( fmt, sub );
+  }
+  ~FmtSub() {
+    if ( this->value != this->buf )
+      ::free( this->value );
+  }
+  void set( int fmt,  const Subscription &sub ) {
+    const char * val = sub.value;
+    this->set( fmt, &val[ FMT_PREF_LEN ], sub.len - FMT_PREF_LEN );
+  }
+  void set( int fmt,  const char *s,  size_t l ) {
+    this->len = l + FMT_PREF_LEN;
+    if ( this->len >= sizeof( this->buf ) ) {
+      char * p = ( this->value == this->buf ? NULL : this->value );
+      this->value = (char *) ::realloc( p, this->len + 1 );
+    }
+    ::memcpy( this->value, pref[ fmt ], FMT_PREF_LEN );
+    ::memcpy( &this->value[ FMT_PREF_LEN ], s, l );
+    this->value[ this->len ] = '\0';
+  }
+  uint32_t hash( uint32_t seed ) const {
+    return kv_crc_c( this->value, this->len, seed );
+  }
+};
 
 /* called after daemon responds with CONNECTED message */
 void
@@ -38,8 +114,18 @@ RvOmmSubmgr::on_connect( EvSocket &conn ) noexcept
   int len = (int) conn.get_peer_address_strlen();
   printf( "Connected: %.*s\n", len, conn.peer_address.buf );
   fflush( stdout );
-  for ( size_t i = 0; i < this->sub_count; i++ )
-    this->sub_db.add_wildcard( this->sub[ i ] );
+  size_t count = ( this->sub_count == 0 ? 1 : this->sub_count );
+  for ( size_t i = 0; i < count; i++ ) {
+    if ( i < this->sub_count && ::strlen( this->sub[ i ] ) > 255-FMT_PREF_LEN )
+      fprintf( stderr, "sub %s too long\n", this->sub[ i ] );
+    else {
+      for ( int j = 0; j < MAX_FMT_PREFIX; j++ ) {
+        const char *s = ( i == this->sub_count ? ">" : this->sub[ i ] );
+        FmtSub tmp( j, s, ::strlen( s ) );
+        this->sub_db.add_wildcard( tmp.value );
+      }
+    }
+  }
   this->start_subscriptions();
 }
 
@@ -52,7 +138,7 @@ RvOmmSubmgr::start_subscriptions( void ) noexcept
                              "omm_submgr" );
   this->PeerData::set_name( "omm_submgr", 10 );
   this->poll.add_sock( this );
-  this->sub_db.start_subscriptions( this->sub_count == 0 );
+  this->sub_db.start_subscriptions( false );
   this->poll.timer.add_timer_seconds( this->fd, 3, 1, 0 );
 }
 
@@ -81,87 +167,181 @@ is_rwf_solicited( EvPublish &pub ) noexcept
   return ( msg_flags & RWF_REFRESH_SOLICITED ) != 0;
 }
 
-bool
-RvOmmSubmgr::convert_to_msg( EvPublish &pub,  uint32_t type_id ) noexcept
+template<class Writer>
+void append_hdr( Writer &w,  bool is_initial,  uint16_t rec_type,
+                 uint16_t seqno,  uint16_t status )
+{
+  uint16_t t = ( is_initial ? 8 : 1 );
+  w.append_uint( SASS_MSG_TYPE  , SASS_MSG_TYPE_LEN  , t );
+  if ( rec_type != 0 )
+    w.append_uint( SASS_REC_TYPE, SASS_REC_TYPE_LEN  , rec_type );
+  w.append_uint( SASS_SEQ_NO    , SASS_SEQ_NO_LEN    , seqno )
+   .append_uint( SASS_REC_STATUS, SASS_REC_STATUS_LEN, status );
+}
+
+int
+RvOmmSubmgr::convert_to_msg( EvPublish &pub,  uint32_t type_id,
+                             FlistEntry &flist ) noexcept
 {
   if ( this->dict.rdm_dict == NULL || pub.msg_enc != RWF_MSG_TYPE_ID )
-    return false;
+    return Err::NO_DICTIONARY;
+
+  if ( type_id == RWF_MSG_TYPE_ID )
+    return 0;
 
   MDMsgMem mem;
   RwfMsg * m = RwfMsg::unpack_message( (void *) pub.msg, 0, pub.msg_len,
                                        RWF_MSG_TYPE_ID, this->dict.rdm_dict,
                                        mem );
   if ( m == NULL )
-    return false;
+    return Err::INVALID_MSG;
 
-  RwfMsg * cmsg = m->get_container_msg();
-  if ( cmsg == NULL )
-    return false;
+  int      status;
+  bool     is_initial = ( m->msg.msg_class == REFRESH_MSG_CLASS );
+  uint64_t seq_num    = ( m->msg.test( X_HAS_SEQ_NUM ) ? m->msg.seq_num : 0 );
+  RwfMsg * fields     = m->get_container_msg();
 
+  if ( fields == NULL || fields->base.type_id != RWF_FIELD_LIST )
+    return Err::BAD_SUB_MSG;
+
+  if ( ( fields->fields.flags & RwfFieldListHdr::HAS_FIELD_LIST_INFO ) != 0 ) {
+    if ( flist.flist != fields->fields.flist ) {
+      flist.flist = fields->fields.flist;
+
+      if ( flist.flist != 0 && this->dict.flist_dict != NULL &&
+           this->dict.cfile_dict != NULL ) {
+        MDLookup by( flist.flist );
+        if ( this->dict.flist_dict->lookup( by ) ) {
+          MDLookup fc( by.fname, by.fname_len );
+          if ( this->dict.cfile_dict->get( fc ) && fc.ftype == MD_MESSAGE )
+            flist.rec_type = fc.fid;
+        }
+      }
+    }
+  }
+  size_t sz = pub.msg_len * 4 + 4 * 1024;
   if ( type_id == RVMSG_TYPE_ID ) {
-    RvMsgWriter rvmsg( this->client.alloc_temp( 1024 ), 1024 );
-    if ( rvmsg.convert_msg( *cmsg, false ) != 0 )
-      return false;
-    pub.msg     = rvmsg.buf;
-    pub.msg_len = rvmsg.update_hdr();
+    RvMsgWriter w( this->client.alloc_temp( sz ), sz );
+    append_hdr<RvMsgWriter>( w, is_initial, flist.rec_type, seq_num, 0 );
+    if ( (status = w.convert_msg( *fields, true )) != 0 )
+      return status;
+    pub.msg     = w.buf;
+    pub.msg_len = w.update_hdr();
     pub.msg_enc = RVMSG_TYPE_ID;
-    return true;
+    return 0;
   }
   if ( type_id == TIBMSG_TYPE_ID ) {
-    TibMsgWriter tibmsg( this->client.alloc_temp( 1024 ), 1024 );
-    if ( tibmsg.convert_msg( *cmsg, false ) != 0 )
-      return false;
-    pub.msg     = tibmsg.buf;
-    pub.msg_len = tibmsg.update_hdr();
+    TibMsgWriter w( this->client.alloc_temp( sz ), sz );
+    append_hdr<TibMsgWriter>( w, is_initial, flist.rec_type, seq_num, 0 );
+    if ( (status = w.convert_msg( *fields, true )) != 0 )
+      return status;
+    pub.msg     = w.buf;
+    pub.msg_len = w.update_hdr();
     pub.msg_enc = TIBMSG_TYPE_ID;
-    return true;
+    return 0;
   }
   if ( type_id == TIB_SASS_TYPE_ID ) {
-    TibSassMsgWriter sassmsg( this->dict.cfile_dict,
-                              this->client.alloc_temp( 1024 ), 1024 );
-    if ( sassmsg.convert_msg( *cmsg, false ) != 0 )
-      return false;
-    pub.msg     = sassmsg.buf;
-    pub.msg_len = sassmsg.update_hdr();
+    TibSassMsgWriter w( this->dict.cfile_dict,
+                        this->client.alloc_temp( sz ), sz );
+    append_hdr<TibSassMsgWriter>( w, is_initial, flist.rec_type, seq_num, 0 );
+    if ( (status = w.convert_msg( *fields, true )) != 0 )
+      return status;
+    pub.msg     = w.buf;
+    pub.msg_len = w.update_hdr();
     pub.msg_enc = TIB_SASS_TYPE_ID;
-    return true;
+    return 0;
   }
-  return false;
+  return Err::NO_MSG_IMPL;
 }
 
 bool
 RvOmmSubmgr::on_msg( EvPublish &pub ) noexcept
 {
-  EvPublish pub2( pub );
-  if ( ! this->convert_to_msg( pub2, TIB_SASS_TYPE_ID ) ) {
-    fprintf( stderr, "failed to convert msg %.*s\n",
-             (int) pub.subject_len, pub.subject );
-    return true;
+  RouteLoc     loc;
+  FlistEntry * flist =
+    this->flist_tab.upsert( pub.subj_hash, pub.subject, pub.subject_len, loc );
+  if ( loc.is_new ) {
+    flist->init();
   }
-
   if ( is_rwf_solicited( pub ) ) {
     const char * reply;
     size_t       reply_len;
     RouteLoc     loc;
     size_t       pos;
-    ReplyEntry * entry =
-      this->reply_tab.find( pub.subj_hash, pub.subject, pub.subject_len,
-                            loc );
-    if ( entry != NULL ) {
-      for ( bool b = entry->first_reply( pos, reply, reply_len ); b;
-            b = entry->next_reply( pos, reply, reply_len ) ) {
-        pub2.subject     = reply;
-        pub2.subject_len = reply_len;
-        pub2.subj_hash   = 0;
-        printf( "on_initial %.*s\n", (int) pub.subject_len, pub.subject );
-        this->client.on_msg( pub2 );
+
+    for ( int i = 0; i < MAX_FMT_PREFIX; i++ ) {
+      ReplyEntry * entry =
+        this->reply_tab[ i ].find( pub.subj_hash, pub.subject, pub.subject_len,
+                                   loc );
+      if ( entry != NULL ) {
+        EvPublish pub2( pub );
+        int status = this->convert_to_msg( pub2, fmt_type_id[ i ], *flist );
+        if ( status != 0 ) {
+          fprintf( stderr, "failed to convert msg %.*s to %s, status %d\n",
+                   (int) pub.subject_len, pub.subject, pref[ i ], status );
+        }
+        else {
+          for ( bool b = entry->first_reply( pos, reply, reply_len ); b;
+                b = entry->next_reply( pos, reply, reply_len ) ) {
+            pub2.subject     = reply;
+            pub2.subject_len = reply_len;
+            pub2.subj_hash   = 0;
+            printf( "on_initial %.*s\n", (int) pub.subject_len, pub.subject );
+            this->client.on_msg( pub2 );
+          }
+        }
+        this->reply_tab[ i ].remove( loc );
       }
-      this->reply_tab.remove( loc );
     }
     return true;
   }
-  printf( "on_msg %.*s\n", (int) pub.subject_len, pub.subject );
-  this->client.on_msg( pub2 );
+  uint32_t refs[ MAX_FMT_PREFIX ],
+           hash[ MAX_FMT_PREFIX ];
+  FmtSub   sub[ MAX_FMT_PREFIX ];
+  int      i;
+
+  for ( i = 0; i < MAX_FMT_PREFIX; i++ ) {
+    refs[ i ] = 0;
+    sub[ i ].set( i, pub.subject, pub.subject_len );
+    hash[ i ] = sub[ i ].hash( 0 );
+  }
+  for ( uint8_t cnt = 0; cnt < pub.prefix_cnt; cnt++ ) {
+    uint32_t h = pub.hash[ cnt ];
+    if ( pub.subj_hash == h ) {
+      for ( i = 0; i < MAX_FMT_PREFIX; i++ ) {
+        Subscription * entry;
+        entry = this->sub_db.sub_tab.find( hash[ i ], sub[ i ].value,
+                                           sub[ i ].len );
+        if ( entry != NULL )
+          refs[ i ] += entry->refcnt;
+      }
+    }
+    else {
+      uint16_t pref_len = pub.prefix[ cnt ];
+      WildEntry * rt = this->wild_tab.find( h, pub.subject, pref_len );
+      if ( rt != NULL ) {
+        for ( i = 0; i < MAX_FMT_PREFIX; i++ )
+          refs[ i ] += rt->refcnt[ i ];
+      }
+    }
+  }
+
+  for ( int i = 0; i < MAX_FMT_PREFIX; i++ ) {
+    if ( refs[ i ] != 0 ) {
+      EvPublish pub2( pub );
+      int status = this->convert_to_msg( pub2, fmt_type_id[ i ], *flist );
+      if ( status != 0 ) {
+        fprintf( stderr, "failed to convert msg %.*s to %s, status %d\n",
+                 (int) pub.subject_len, pub.subject, pref[ i ], status );
+      }
+      else {
+        pub2.subject     = sub[ i ].value;
+        pub2.subject_len = sub[ i ].len;
+        pub2.subj_hash   = hash[ i ];
+        this->client.on_msg( pub2 );
+      }
+    }
+  }
   return true;
 }
 
@@ -193,37 +373,74 @@ RvOmmSubmgr::on_listen_start( StartListener &add ) noexcept
       add.sub.len, add.sub.value, add.reply_len, add.reply, add.sub.refcnt,
       add.session.len, add.session.value );
   }
-  uint32_t h = kv_crc_c( add.sub.value, add.sub.len, 0 );
-  NotifySub nsub( add.sub.value, add.sub.len, NULL, 0, h, 0, 'V', *this );
-  RouteLoc loc;
+  const char * sub;
+  size_t       sublen;
+  uint32_t     h;
+  int          fmt = pref_match( add.sub, sub, sublen, h );
 
-  if ( add.reply_len > 0 ) {
-    ReplyEntry * entry =
-      this->reply_tab.upsert( h, add.sub.value, (size_t) add.sub.len + 1, loc );
-    if ( loc.is_new ) {
-      entry->sublen = add.sub.len;
-      entry->value[ add.sub.len ] = '\0';
-    }
-    size_t off = entry->len;
-    entry =
-      this->reply_tab.resize( h, entry, off, off + add.reply_len + 1, loc );
-    ::memcpy( &entry->value[ off ], add.reply, add.reply_len );
-    entry->value[ off + add.reply_len ] = '\0';
+  if ( ! SubscriptionDB::is_rv_wildcard( sub, sublen ) ) {
+    ReplyTab & tab    = this->reply_tab[ fmt ];
+    NotifySub  nsub( sub, sublen, NULL, 0, h, 0, 'V', *this );
+    RouteLoc   loc;
+    uint32_t   refcnt = this->sub_refcnt( fmt, add.sub );
 
-    nsub.notify_type = NOTIFY_IS_INITIAL;
-  }
-  else {
-    /* in case where snap arrives before subscribe */
-    if ( this->reply_tab.find( h, add.sub.value, (size_t) add.sub.len + 1,
-                               loc ) != NULL )
+    if ( add.reply_len > 0 ) {
+      ReplyEntry * entry = tab.upsert( h, sub, sublen + 1, loc );
+      if ( loc.is_new ) {
+        entry->sublen = sublen;
+        entry->value[ sublen ] = '\0';
+      }
+      size_t off = entry->len;
+      entry = tab.resize( h, entry, off, off + add.reply_len + 1, loc );
+      if ( entry != NULL ) {
+        ::memcpy( &entry->value[ off ], add.reply, add.reply_len );
+        entry->value[ off + add.reply_len ] = '\0';
+      }
       nsub.notify_type = NOTIFY_IS_INITIAL;
-  }
-  if ( add.sub.refcnt == 1 ) {
-    this->client.sub_route.add_sub( nsub );
+    }
+    else {
+      /* in case where snap arrives before subscribe */
+      if ( tab.find( h, sub, sublen + 1, loc ) != NULL )
+        nsub.notify_type = NOTIFY_IS_INITIAL;
+    }
+    if ( refcnt == 1 ) {
+      nsub.hash_collision = this->sub_route.is_sub_member( h, this->fd );
+      if ( nsub.hash_collision )
+        this->add_collision( h );
+      this->sub_route.add_sub( nsub );
+    }
+    else {
+      nsub.sub_count = refcnt;
+      this->sub_route.notify_sub( nsub );
+    }
   }
   else {
-    nsub.sub_count = add.sub.refcnt;
-    this->client.sub_route.notify_sub( nsub );
+    PatternCvt cvt;
+    RouteLoc   loc;
+    uint32_t   hcnt, cnt;
+  
+    if ( cvt.convert_rv( sub, sublen ) != 0 ) {
+      fprintf( stderr, "bad rv pattern %.*s\n", (int) sublen, sub );
+      return;
+    }
+    h = kv_crc_c( sub, cvt.prefixlen,
+                  this->sub_route.prefix_seed( cvt.prefixlen ) );
+
+    WildEntry *rt = this->wild_tab.upsert2( h, sub, cvt.prefixlen, loc, hcnt );
+    if ( loc.is_new )
+      rt->init();
+
+    printf( "notify_pattern %.*s\n", (int) cvt.prefixlen, sub );
+    NotifyPattern npat( cvt, sub, sublen, NULL, 0, h, hcnt > 0, 'V', *this );
+    if ( add.sub.refcnt == 1 )
+      rt->add( fmt );
+
+    if ( (cnt = rt->count()) == 1 )
+      this->sub_route.add_pat( npat );
+    else {
+      npat.sub_count = cnt;
+      this->sub_route.notify_pat( npat );
+    }
   }
 }
 
@@ -235,16 +452,87 @@ RvOmmSubmgr::on_listen_stop( StopListener &rem ) noexcept
     rem.sub.len, rem.sub.value, rem.sub.refcnt,
     rem.session.len, rem.session.value, rem.is_orphan ? " orphan" : "" );
 
-  uint32_t h = kv_crc_c( rem.sub.value, rem.sub.len, 0 );
-  NotifySub nsub( rem.sub.value, rem.sub.len, NULL, 0, h, 0, 'V', *this );
-  if ( rem.sub.refcnt == 0 ) {
-    this->reply_tab.remove( h, rem.sub.value, rem.sub.len );
-    this->client.sub_route.del_sub( nsub );
+  const char * sub;
+  size_t       sublen;
+  uint32_t     h;
+  int          fmt = pref_match( rem.sub, sub, sublen, h );
+
+  if ( ! SubscriptionDB::is_rv_wildcard( sub, sublen ) ) {
+    ReplyTab & tab    = this->reply_tab[ fmt ];
+    NotifySub  nsub( sub, sublen, NULL, 0, h, 0, 'V', *this );
+    uint32_t   refcnt = this->sub_refcnt( fmt, rem.sub );
+
+    if ( refcnt == 0 ) {
+      tab.remove( h, sub, sublen );
+      nsub.hash_collision = this->rem_collision( h );
+      this->sub_route.del_sub( nsub );
+      /* maybe don't remove in case of bcast feed or replay feed */
+      if ( this->wild_tab.is_empty() )
+        this->flist_tab.remove( h, sub, sublen );
+    }
+    else {
+      nsub.sub_count = refcnt;
+      this->sub_route.notify_unsub( nsub );
+    }
   }
   else {
-    nsub.sub_count = rem.sub.refcnt;
-    this->client.sub_route.notify_unsub( nsub );
+    PatternCvt cvt;
+    RouteLoc   loc;
+    uint32_t   hcnt, cnt;
+  
+    if ( cvt.convert_rv( sub, sublen ) != 0 ) {
+      fprintf( stderr, "bad rv pattern %.*s\n", (int) sublen, sub );
+      return;
+    }
+    h = kv_crc_c( sub, cvt.prefixlen,
+                  this->sub_route.prefix_seed( cvt.prefixlen ) );
+
+    WildEntry *rt = this->wild_tab.find2( h, sub, cvt.prefixlen, loc, hcnt );
+    if ( rt == NULL ) {
+      fprintf( stderr, "rv pattern not found %.*s\n", (int) sublen, sub );
+      return;
+    }
+    NotifyPattern npat( cvt, sub, sublen, NULL, 0, h, hcnt > 1, 'V', *this );
+    if ( rem.sub.refcnt == 0 )
+      rt->sub( fmt );
+    if ( (cnt = rt->count()) == 0 ) {
+      this->wild_tab.remove( loc );
+      this->sub_route.del_pat( npat );
+    }
+    else {
+      npat.sub_count = cnt;
+      this->sub_route.notify_pat( npat );
+    }
   }
+}
+
+void
+RvOmmSubmgr::add_collision( uint32_t h ) noexcept
+{
+  size_t   pos;
+  uint32_t val;
+  if ( this->coll_ht == NULL )
+    this->coll_ht = UIntHashTab::resize( NULL );
+  if ( this->coll_ht->find( h, pos, val ) )
+    this->coll_ht->set( h, pos, val + 1 );
+  else
+    this->coll_ht->set_rsz( this->coll_ht, h, pos, 1 );
+}
+
+bool
+RvOmmSubmgr::rem_collision( uint32_t h ) noexcept
+{
+  size_t   pos;
+  uint32_t val;
+  if ( this->coll_ht != NULL && this->coll_ht->find( h, pos, val ) ) {
+    if ( val == 1 )
+      this->coll_ht->remove( pos );
+    else {
+      this->coll_ht->set( h, pos, val - 1 );
+      return true;
+    }
+  }
+  return false;
 }
 
 void
@@ -256,27 +544,52 @@ RvOmmSubmgr::on_snapshot( SnapListener &snp ) noexcept
 
   if ( snp.reply_len == 0 )
     return;
-  uint32_t h = kv_crc_c( snp.sub.value, snp.sub.len, 0 );
 
-  RouteLoc loc;
-  ReplyEntry * entry =
-    this->reply_tab.upsert( h, snp.sub.value, (size_t) snp.sub.len + 1, loc );
+  const char * sub;
+  size_t       sublen;
+  uint32_t     h;
+  int          fmt    = pref_match( snp.sub, sub, sublen, h );
+  ReplyTab   & tab    = this->reply_tab[ fmt ];
+  uint32_t     refcnt = this->sub_refcnt( fmt, snp.sub );
+  RouteLoc     loc;
+  ReplyEntry * entry  = tab.upsert( h, sub, sublen + 1, loc );
+
   if ( loc.is_new ) {
-    entry->sublen = snp.sub.len;
-    entry->value[ snp.sub.len ] = '\0';
+    entry->sublen = sublen;
+    entry->value[ sublen ] = '\0';
   }
   size_t off = entry->len;
-  entry =
-    this->reply_tab.resize( h, entry, off, off + snp.reply_len + 1, loc );
-  ::memcpy( &entry->value[ off ], snp.reply, snp.reply_len );
-  entry->value[ off + snp.reply_len ] = '\0';
-
-  if ( snp.sub.refcnt != 0 ) {
-    NotifySub nsub( snp.sub.value, snp.sub.len, NULL, 0, h, 0, 'V', *this );
-    nsub.notify_type = NOTIFY_IS_INITIAL;
-    nsub.sub_count = snp.sub.refcnt;
-    this->client.sub_route.notify_sub( nsub );
+  entry = tab.resize( h, entry, off, off + snp.reply_len + 1, loc );
+  if ( entry != NULL ) {
+    ::memcpy( &entry->value[ off ], snp.reply, snp.reply_len );
+    entry->value[ off + snp.reply_len ] = '\0';
   }
+  /* could start a subscription here, need a timeout to unsub */
+  if ( refcnt != 0 ) {
+    NotifySub nsub( sub, sublen, NULL, 0, h, 0, 'V', *this );
+    nsub.notify_type = NOTIFY_IS_INITIAL;
+    nsub.sub_count = refcnt;
+    this->sub_route.notify_sub( nsub );
+  }
+}
+
+uint32_t
+RvOmmSubmgr::sub_refcnt( int fmt,  Subscription &sub ) noexcept
+{
+  uint32_t       refcnt = sub.refcnt;
+  FmtSub         next( ( fmt + 1 ) % MAX_FMT_PREFIX, sub );
+  Subscription * entry;
+
+  entry = this->sub_db.sub_tab.find( next.hash( 0 ), next.value, next.len );
+  if ( entry != NULL )
+    refcnt += entry->refcnt;
+  for ( int i = fmt + 2; i < fmt + MAX_FMT_PREFIX; i++ ) {
+    next.set( i % MAX_FMT_PREFIX, sub );
+    entry = this->sub_db.sub_tab.find( next.hash( 0 ), next.value, next.len );
+    if ( entry != NULL )
+      refcnt += entry->refcnt;
+  }
+  return refcnt;
 }
 
 /* when client connection stops */

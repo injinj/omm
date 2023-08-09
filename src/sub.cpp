@@ -240,8 +240,8 @@ EvOmmConn::close_streams( void ) noexcept
                 sub_rt.hcnt++;
             } while ( sub_rt.hcnt == 1 );
           }
-          NotifySub nsub( sub_rt.rt->value, sub_rt.rt->len, NULL, 0, sub_rt.hash,
-                          sub_rt.hcnt > 1, 'O', *this );
+          NotifySub nsub( sub_rt.rt->value, sub_rt.rt->len, NULL, 0,
+                          sub_rt.hash, sub_rt.hcnt > 1, 'O', *this );
           this->sub_route.del_sub( nsub );
           sub_rt.rt->domain = 0;
           break;

@@ -18,6 +18,7 @@
 #include <raimd/app_a.h>
 #include <raimd/enum_def.h>
 #include <omm/test_pub.h>
+#include <omm/test_replay.h>
 #include <omm/rv_submgr.h>
 #include <sassrv/ev_rv_client.h>
 
@@ -34,11 +35,14 @@ struct Args : public MainLoopVars { /* argv[] parsed args */
              * publisher,
              * rv_daemon,
              * rv_network,
-             * rv_service;
+             * rv_service,
+             * replay,
+             * file_name;
   int          omm_port;
   bool         test;
   Args() : path( 0 ), publisher( 0 ), rv_daemon( 0 ), rv_network( 0 ),
-           rv_service( 0 ), omm_port( 0 ), test( false ) {}
+           rv_service( 0 ), replay( 0 ), file_name( 0 ), omm_port( 0 ),
+           test( false ) {}
 };
 
 struct Loop : public MainLoop<Args> {
@@ -65,12 +69,19 @@ struct Loop : public MainLoop<Args> {
       p->add_test_source( "OPR", 102 );
       p->start();
     }
+    if ( this->r.file_name != NULL ) {
+      TestReplay *p = new ( ::malloc( sizeof( TestReplay ) ) )
+        TestReplay( this->omm_sv );
+      p->add_replay_file( this->r.replay, 103, this->r.file_name );
+      p->start();
+    }
     if ( this->r.publisher != NULL )
       this->add_publisher( this->r.publisher );
     if ( this->r.rv_daemon != NULL || this->r.rv_network != NULL ||
          this->r.rv_service != NULL )
       this->add_rvclient( this->r.rv_daemon, this->r.rv_network,
                           this->r.rv_service );
+    this->omm_sv->x_source_db.print_sources();
     return true;
   }
 
@@ -149,6 +160,8 @@ main( int argc, const char *argv[] )
   r.add_desc( "  -g        = turn on debug" );
   r.add_desc( "  -t        = add test sources" );
   r.add_desc( "  -p host   = connect to publisher, interactive or bcast" );
+  r.add_desc( "  -f file   = replay file name" );
+  r.add_desc( "  -r feed   = replay feed name       (XXX)" );
   if ( ! r.parse_args( argc, argv ) )
     return 1;
   if ( shm.open( r.map_name, r.db_num ) != 0 )
@@ -162,6 +175,8 @@ main( int argc, const char *argv[] )
   r.publisher  = r.get_arg( argc, argv, 1, "-p", NULL );
   r.path       = r.get_arg( argc, argv, 1, "-c", ".", "cfile_path" );
   r.test       = r.bool_arg( argc, argv, 0, "-t", NULL, NULL );
+  r.replay     = r.get_arg( argc, argv, 1, "-r", "XXX" );
+  r.file_name  = r.get_arg( argc, argv, 1, "-f", NULL );
   if ( r.bool_arg( argc, argv, 0, "-g", NULL, NULL ) )
     omm_debug = 1;
 

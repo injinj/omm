@@ -7,6 +7,7 @@
 #include <raimd/app_a.h>
 #include <raimd/enum_def.h>
 #include <raimd/cfile.h>
+#include <raimd/flistmap.h>
 #include <omm/ev_omm.h>
 #include <omm/ev_omm_client.h>
 #include <omm/src_dir.h>
@@ -294,15 +295,21 @@ OmmDict::load_cfiles( const char *path ) noexcept
     /*dict_build.debug_flags = MD_DICT_PRINT_FILES;*/
     if ( AppA::parse_path( dict_build, path, "RDMFieldDictionary" ) == 0 ) {
       EnumDef::parse_path( dict_build, path, "enumtype.def" );
-      dict_build.index_dict( "app_a", this->rdm_dict );
+      dict_build.index_dict( "app_a", this->dict );
+      this->rdm_dict = this->dict;
     }
     if ( this->rdm_dict != NULL && this->rdm_dict->dict_type[ 0 ] == 'a' )
       have_dictionary = true;
     dict_build.clear_build();
     if ( CFile::parse_path( dict_build, path, "tss_fields.cf" ) == 0 ) {
       CFile::parse_path( dict_build, path, "tss_records.cf" );
-      dict_build.index_dict( "cfile", this->cfile_dict );
-      this->cfile_dict->next = this->rdm_dict;
+      dict_build.index_dict( "cfile", this->dict );
+      this->cfile_dict = this->dict;
+    }
+    dict_build.clear_build();
+    if ( FlistMap::parse_path( dict_build, path, "flistmapping" ) == 0 ) {
+      dict_build.index_dict( "flist", this->dict );
+      this->flist_dict = this->dict;
     }
   }
   return have_dictionary;

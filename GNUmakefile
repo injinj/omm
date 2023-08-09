@@ -257,7 +257,7 @@ server_includes := $(sassrv_includes)
 rv_submgr_includes := $(sassrv_includes)
 $(objd)/server.o : .copr/Makefile
 $(objd)/server.fpic.o : .copr/Makefile
-omm_server_files := server test_pub rv_submgr
+omm_server_files := server test_pub test_replay rv_submgr
 omm_server_cfile := $(addprefix src/, $(addsuffix .cpp, $(omm_server_files)))
 omm_server_objs  := $(addprefix $(objd)/, $(addsuffix .o, $(omm_server_files)))
 omm_server_deps  := $(addprefix $(dependd)/, $(addsuffix .d, $(omm_server_files)))

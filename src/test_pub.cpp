@@ -20,7 +20,6 @@ using namespace md;
 void
 TestPublish::start( void ) noexcept
 {
-  this->omm_sv.x_source_db.print_sources();
   this->omm_sv.sub_route.add_route_notify( *this );
   this->poll.timer.add_timer_seconds( *this, 5, 1, 0 );
 }
@@ -34,8 +33,8 @@ TestPublish::add_test_source( const char *feed_name,
                               MARKET_PRICE_DOMAIN };
   static RwfQos  qos      = { QOS_TIME_REALTIME, QOS_RATE_TICK_BY_TICK, 0, 0, 0 };
 
-  char buf[ 1024 ];
-  MDMsgMem mem;
+  char         buf[ 1024 ];
+  MDMsgMem     mem;
   RwfMapWriter map( mem, this->omm_sv.dict.rdm_dict, buf, sizeof( buf ) );
   RwfState     state = { STREAM_STATE_OPEN, DATA_STATE_OK, 0, { "OK", 2 } };
 
@@ -89,7 +88,8 @@ TestPublish::add_test_source( const char *feed_name,
      .end_entry();
   map.end_map();
 
-  RwfMsg *m = RwfMsg::unpack_map( map.buf, 0, map.off, RWF_MAP_TYPE_ID, NULL, mem );
+  RwfMsg *m =
+    RwfMsg::unpack_map( map.buf, 0, map.off, RWF_MAP_TYPE_ID, NULL, mem );
   if ( is_omm_debug ) {
     MDOutput mout;
     if ( m != NULL )
@@ -139,10 +139,7 @@ TestRoute::update( uint64_t cur_ns ) noexcept
   this->seqno++;
 }
 
-static const char msg_type[]   = "MSG_TYPE",
-                  seq_no[]     = "SEQ_NO",
-                  rec_status[] = "REC_STATUS",
-                  dsply_name[] = "DSPLY_NAME",
+static const char dsply_name[] = "DSPLY_NAME",
                   bid_size[]   = "BIDSIZE",
                   ask_size[]   = "ASKSIZE",
                   bid[]        = "BID",
@@ -150,7 +147,7 @@ static const char msg_type[]   = "MSG_TYPE",
                   timact[]     = "TIMACT",
                   trade_date[] = "TRADE_DATE";
 void
-TestPublish::on_sub( kv::NotifySub &sub ) noexcept
+TestPublish::on_sub( NotifySub &sub ) noexcept
 {
   if ( this->dict.rdm_dict == NULL ) {
     fprintf( stderr, "No dictionary, sub %.*s\n",
@@ -182,14 +179,14 @@ TestPublish::on_sub( kv::NotifySub &sub ) noexcept
 }
 
 void
-TestPublish::on_resub( kv::NotifySub &sub ) noexcept
+TestPublish::on_resub( NotifySub &sub ) noexcept
 {
   if ( sub.is_notify_initial() )
     this->on_sub( sub );
 }
 
 void
-TestPublish::on_unsub( kv::NotifySub &sub ) noexcept
+TestPublish::on_unsub( NotifySub &sub ) noexcept
 {
   if ( sub.sub_count == 0 ) {
     RouteLoc    loc;
@@ -222,9 +219,6 @@ TestPublish::initial( const char *reply,  size_t reply_len,  OmmSource *src,
      .end_msg_key();
   msg.add_field_list()
      .add_flist( 90 )
-     .append_int    ( msg_type   , 8 )
-     .append_int    ( seq_no     , rt->seqno )
-     .append_string ( rec_status , "OK" )
      .append_string ( dsply_name , ric )
      .append_decimal( ask        , rt->ask )
      .append_decimal( bid        , rt->bid )
@@ -261,9 +255,6 @@ TestPublish::update( OmmSource *src,  const char *ric,  size_t ric_len,
   msg.add_update( UPD_TYPE_QUOTE )
      .add_field_list()
      .add_flist( 90 )
-     .append_int    ( msg_type   , 1 )
-     .append_int    ( seq_no     , rt->seqno )
-     .append_string ( rec_status , "OK" )
      .append_decimal( ask        , rt->ask )
      .append_decimal( bid        , rt->bid )
      .append_decimal( ask_size   , rt->ask_size )
@@ -271,6 +262,7 @@ TestPublish::update( OmmSource *src,  const char *ric,  size_t ric_len,
      .append_time   ( timact     , rt->time )
      .append_date   ( trade_date , rt->date )
      .end_msg();
+  printf( "pub update %.*s\n", (int) rt->len, rt->value );
   EvPublish pub( rt->value, rt->len, NULL, 0, msg.buf, msg.off,
                  this->poll.sub_route, this->omm_sv, rt->hash,
                  RWF_MSG_TYPE_ID );
@@ -305,12 +297,12 @@ TestPublish::timer_cb( uint64_t, uint64_t ) noexcept
 }
 
 void
-TestPublish::on_psub( kv::NotifyPattern & ) noexcept
+TestPublish::on_psub( NotifyPattern & ) noexcept
 {
 }
 
 void
-TestPublish::on_punsub( kv::NotifyPattern & ) noexcept
+TestPublish::on_punsub( NotifyPattern & ) noexcept
 {
 }
 
