@@ -68,6 +68,8 @@ RvOmmSubmgr::RvOmmSubmgr( kv::EvPoll &p,  sassrv::EvRvClient &c,
 {
   c.fwd_all_msgs = 0;
   this->sock_opts = OPT_NO_POLL;
+  if ( omm_debug )
+    this->sub_db.mout = &this->dbg_out;
 }
 
 struct FmtSub {
@@ -168,15 +170,31 @@ is_rwf_solicited( EvPublish &pub ) noexcept
 }
 
 template<class Writer>
-void append_hdr( Writer &w,  bool is_initial,  uint16_t rec_type,
-                 uint16_t seqno,  uint16_t status )
+void append_hdr( Writer &w,  MDFormClass *form,  uint16_t msg_type,
+                 uint16_t rec_type,  uint16_t seqno,  uint16_t status,
+                 const char *subj,  size_t sublen )
 {
-  uint16_t t = ( is_initial ? 8 : 1 );
-  w.append_uint( SASS_MSG_TYPE  , SASS_MSG_TYPE_LEN  , t );
-  if ( rec_type != 0 )
-    w.append_uint( SASS_REC_TYPE, SASS_REC_TYPE_LEN  , rec_type );
-  w.append_uint( SASS_SEQ_NO    , SASS_SEQ_NO_LEN    , seqno )
-   .append_uint( SASS_REC_STATUS, SASS_REC_STATUS_LEN, status );
+  if ( msg_type != INITIAL_TYPE || form == NULL ) {
+    w.append_uint( SASS_MSG_TYPE  , SASS_MSG_TYPE_LEN  , msg_type );
+    if ( rec_type != 0 )
+      w.append_uint( SASS_REC_TYPE, SASS_REC_TYPE_LEN  , rec_type );
+    w.append_uint( SASS_SEQ_NO    , SASS_SEQ_NO_LEN    , seqno )
+     .append_uint( SASS_REC_STATUS, SASS_REC_STATUS_LEN, status );
+  }
+  else {
+    const MDFormEntry * e = form->entries;
+    MDLookup by;
+    if ( form->get( by.nm( SASS_MSG_TYPE, SASS_MSG_TYPE_LEN ) ) == &e[ 0 ] )
+      w.append_uint( by.fname, by.fname_len, msg_type );
+    if ( form->get( by.nm( SASS_REC_TYPE, SASS_REC_TYPE_LEN ) ) == &e[ 1 ] )
+      w.append_uint( by.fname, by.fname_len, rec_type );
+    if ( form->get( by.nm( SASS_SEQ_NO, SASS_SEQ_NO_LEN ) ) == &e[ 2 ] )
+      w.append_uint( by.fname, by.fname_len, seqno );
+    if ( form->get( by.nm( SASS_REC_STATUS, SASS_REC_STATUS_LEN ) ) == &e[ 3 ] )
+      w.append_uint( by.fname, by.fname_len, status );
+    if ( form->get( by.nm( SASS_SYMBOL, SASS_SYMBOL_LEN ) ) == &e[ 4 ] )
+      w.append_string( by.fname, by.fname_len, subj, sublen );
+  }
 }
 
 int
@@ -189,18 +207,28 @@ RvOmmSubmgr::convert_to_msg( EvPublish &pub,  uint32_t type_id,
   if ( type_id == RWF_MSG_TYPE_ID )
     return 0;
 
-  MDMsgMem mem;
+  this->cvt_mem.reuse();
   RwfMsg * m = RwfMsg::unpack_message( (void *) pub.msg, 0, pub.msg_len,
                                        RWF_MSG_TYPE_ID, this->dict.rdm_dict,
-                                       mem );
+                                       this->cvt_mem );
   if ( m == NULL )
     return Err::INVALID_MSG;
 
-  int      status;
-  bool     is_initial = ( m->msg.msg_class == REFRESH_MSG_CLASS );
-  uint64_t seq_num    = ( m->msg.test( X_HAS_SEQ_NUM ) ? m->msg.seq_num : 0 );
-  RwfMsg * fields     = m->get_container_msg();
+  int          status;
+  uint64_t     seq_num  = ( m->msg.test( X_HAS_SEQ_NUM ) ? m->msg.seq_num : 0 );
+  RwfMsg     * fields   = m->get_container_msg();
+  const char * name     = NULL;
+  size_t       name_len = 0;
+  uint16_t     msg_type = UPDATE_TYPE;
 
+  if ( m->msg.msg_class == REFRESH_MSG_CLASS ) {
+    name     = m->msg.msg_key.name;
+    name_len = m->msg.msg_key.name_len;
+    msg_type = INITIAL_TYPE;
+  }
+  else {
+    msg_type = rwf_to_sass_msg_type( *m );
+  }
   if ( fields == NULL || fields->base.type_id != RWF_FIELD_LIST )
     return Err::BAD_SUB_MSG;
 
@@ -213,16 +241,22 @@ RvOmmSubmgr::convert_to_msg( EvPublish &pub,  uint32_t type_id,
         MDLookup by( flist.flist );
         if ( this->dict.flist_dict->lookup( by ) ) {
           MDLookup fc( by.fname, by.fname_len );
-          if ( this->dict.cfile_dict->get( fc ) && fc.ftype == MD_MESSAGE )
+          if ( this->dict.cfile_dict->get( fc ) && fc.ftype == MD_MESSAGE ) {
             flist.rec_type = fc.fid;
+            if ( fc.map_num != 0 )
+              flist.form = this->dict.cfile_dict->get_form_class( fc );
+          }
         }
       }
     }
   }
-  size_t sz = pub.msg_len * 4 + 4 * 1024;
+  size_t sz = pub.msg_len + 1024;
+  void * buf_ptr = this->cvt_mem.make( sz );
+
   if ( type_id == RVMSG_TYPE_ID ) {
-    RvMsgWriter w( this->client.alloc_temp( sz ), sz );
-    append_hdr<RvMsgWriter>( w, is_initial, flist.rec_type, seq_num, 0 );
+    RvMsgWriter w( this->cvt_mem, buf_ptr, sz );
+    append_hdr<RvMsgWriter>( w, flist.form, msg_type, flist.rec_type,
+                             seq_num, 0, name, name_len );
     if ( (status = w.convert_msg( *fields, true )) != 0 )
       return status;
     pub.msg     = w.buf;
@@ -231,8 +265,9 @@ RvOmmSubmgr::convert_to_msg( EvPublish &pub,  uint32_t type_id,
     return 0;
   }
   if ( type_id == TIBMSG_TYPE_ID ) {
-    TibMsgWriter w( this->client.alloc_temp( sz ), sz );
-    append_hdr<TibMsgWriter>( w, is_initial, flist.rec_type, seq_num, 0 );
+    TibMsgWriter w( this->cvt_mem, buf_ptr, sz );
+    append_hdr<TibMsgWriter>( w, flist.form, msg_type, flist.rec_type,
+                              seq_num, 0, name, name_len );
     if ( (status = w.convert_msg( *fields, true )) != 0 )
       return status;
     pub.msg     = w.buf;
@@ -241,9 +276,9 @@ RvOmmSubmgr::convert_to_msg( EvPublish &pub,  uint32_t type_id,
     return 0;
   }
   if ( type_id == TIB_SASS_TYPE_ID ) {
-    TibSassMsgWriter w( this->dict.cfile_dict,
-                        this->client.alloc_temp( sz ), sz );
-    append_hdr<TibSassMsgWriter>( w, is_initial, flist.rec_type, seq_num, 0 );
+    TibSassMsgWriter w( this->cvt_mem, this->dict.cfile_dict, buf_ptr, sz );
+    append_hdr<TibSassMsgWriter>( w, flist.form, msg_type, flist.rec_type,
+                                  seq_num, 0, name, name_len );
     if ( (status = w.convert_msg( *fields, true )) != 0 )
       return status;
     pub.msg     = w.buf;
@@ -254,6 +289,9 @@ RvOmmSubmgr::convert_to_msg( EvPublish &pub,  uint32_t type_id,
   return Err::NO_MSG_IMPL;
 }
 
+static const char   BCAST[]   = "bcast";
+static const size_t BCAST_LEN = sizeof( BCAST ) - 1;
+
 bool
 RvOmmSubmgr::on_msg( EvPublish &pub ) noexcept
 {
@@ -263,6 +301,7 @@ RvOmmSubmgr::on_msg( EvPublish &pub ) noexcept
   if ( loc.is_new ) {
     flist->init();
   }
+  uint32_t bcast_initial = 0;
   if ( is_rwf_solicited( pub ) ) {
     const char * reply;
     size_t       reply_len;
@@ -273,16 +312,22 @@ RvOmmSubmgr::on_msg( EvPublish &pub ) noexcept
       ReplyEntry * entry =
         this->reply_tab[ i ].find( pub.subj_hash, pub.subject, pub.subject_len,
                                    loc );
-      if ( entry != NULL ) {
-        EvPublish pub2( pub );
-        int status = this->convert_to_msg( pub2, fmt_type_id[ i ], *flist );
-        if ( status != 0 ) {
-          fprintf( stderr, "failed to convert msg %.*s to %s, status %d\n",
-                   (int) pub.subject_len, pub.subject, pref[ i ], status );
-        }
-        else {
-          for ( bool b = entry->first_reply( pos, reply, reply_len ); b;
-                b = entry->next_reply( pos, reply, reply_len ) ) {
+      if ( entry == NULL )
+        continue;
+
+      EvPublish pub2( pub );
+      bool      cvt    = false;
+      int       status = 0;
+
+      for ( bool b = entry->first_reply( pos, reply, reply_len ); b;
+            b = entry->next_reply( pos, reply, reply_len ) ) {
+        if ( reply_len != BCAST_LEN ||
+             ::memcmp( reply, BCAST, BCAST_LEN ) != 0 ) {
+          if ( ! cvt ) {
+            cvt    = true;
+            status = this->convert_to_msg( pub2, fmt_type_id[ i ], *flist );
+          }
+          if ( status == 0 ) {
             pub2.subject     = reply;
             pub2.subject_len = reply_len;
             pub2.subj_hash   = 0;
@@ -290,44 +335,53 @@ RvOmmSubmgr::on_msg( EvPublish &pub ) noexcept
             this->client.on_msg( pub2 );
           }
         }
-        this->reply_tab[ i ].remove( loc );
+        else { /* assert start without inbox */
+          bcast_initial |= 1 << i;
+        }
       }
+      this->reply_tab[ i ].remove( loc );
+
+      if ( status != 0 )
+        fprintf( stderr, "failed to convert msg %.*s to %s, status %d\n",
+                 (int) pub.subject_len, pub.subject, pref[ i ], status );
     }
-    return true;
+    if ( bcast_initial == 0 )
+      return true;
   }
-  uint32_t refs[ MAX_FMT_PREFIX ],
+  uint32_t refs = bcast_initial,
            hash[ MAX_FMT_PREFIX ];
   FmtSub   sub[ MAX_FMT_PREFIX ];
   int      i;
 
   for ( i = 0; i < MAX_FMT_PREFIX; i++ ) {
-    refs[ i ] = 0;
     sub[ i ].set( i, pub.subject, pub.subject_len );
     hash[ i ] = sub[ i ].hash( 0 );
   }
-  for ( uint8_t cnt = 0; cnt < pub.prefix_cnt; cnt++ ) {
-    uint32_t h = pub.hash[ cnt ];
-    if ( pub.subj_hash == h ) {
-      for ( i = 0; i < MAX_FMT_PREFIX; i++ ) {
-        Subscription * entry;
-        entry = this->sub_db.sub_tab.find( hash[ i ], sub[ i ].value,
-                                           sub[ i ].len );
-        if ( entry != NULL )
-          refs[ i ] += entry->refcnt;
+  if ( bcast_initial == 0 ) {
+    for ( uint8_t cnt = 0; cnt < pub.prefix_cnt; cnt++ ) {
+      uint32_t h = pub.hash[ cnt ];
+      if ( pub.subj_hash == h ) {
+        for ( i = 0; i < MAX_FMT_PREFIX; i++ ) {
+          Subscription * entry;
+          entry = this->sub_db.sub_tab.find( hash[ i ], sub[ i ].value,
+                                             sub[ i ].len );
+          if ( entry != NULL && entry->refcnt != 0 )
+            refs |= 1 << i;
+        }
       }
-    }
-    else {
-      uint16_t pref_len = pub.prefix[ cnt ];
-      WildEntry * rt = this->wild_tab.find( h, pub.subject, pref_len );
-      if ( rt != NULL ) {
-        for ( i = 0; i < MAX_FMT_PREFIX; i++ )
-          refs[ i ] += rt->refcnt[ i ];
+      else {
+        uint16_t pref_len = pub.prefix[ cnt ];
+        WildEntry * rt = this->wild_tab.find( h, pub.subject, pref_len );
+        if ( rt != NULL ) {
+          for ( i = 0; i < MAX_FMT_PREFIX; i++ )
+            if ( rt->refcnt[ i ] != 0 )
+              refs |= 1 << i;
+        }
       }
     }
   }
-
   for ( int i = 0; i < MAX_FMT_PREFIX; i++ ) {
-    if ( refs[ i ] != 0 ) {
+    if ( ( refs & ( 1 << i ) ) != 0 ) {
       EvPublish pub2( pub );
       int status = this->convert_to_msg( pub2, fmt_type_id[ i ], *flist );
       if ( status != 0 ) {
@@ -384,17 +438,19 @@ RvOmmSubmgr::on_listen_start( StartListener &add ) noexcept
     RouteLoc   loc;
     uint32_t   refcnt = this->sub_refcnt( fmt, add.sub );
 
-    if ( add.reply_len > 0 ) {
+    if ( add.reply_len > 0 || ! add.is_listen_start ) {
       ReplyEntry * entry = tab.upsert( h, sub, sublen + 1, loc );
       if ( loc.is_new ) {
         entry->sublen = sublen;
         entry->value[ sublen ] = '\0';
       }
+      size_t  reply_len = ( add.is_listen_start ? add.reply_len : BCAST_LEN );
+      const char *reply = ( add.is_listen_start ? add.reply : BCAST );
       size_t off = entry->len;
-      entry = tab.resize( h, entry, off, off + add.reply_len + 1, loc );
+      entry = tab.resize( h, entry, off, off + reply_len + 1, loc );
       if ( entry != NULL ) {
-        ::memcpy( &entry->value[ off ], add.reply, add.reply_len );
-        entry->value[ off + add.reply_len ] = '\0';
+        ::memcpy( &entry->value[ off ], reply, reply_len );
+        entry->value[ off + reply_len ] = '\0';
       }
       nsub.notify_type = NOTIFY_IS_INITIAL;
     }

@@ -63,6 +63,7 @@ struct WildEntry {
 struct WildTab : public kv::RouteVec<WildEntry> {};
 
 struct FlistEntry {
+  md::MDFormClass * form;
   uint32_t hash;
   uint16_t flist,
            rec_type,
@@ -70,6 +71,7 @@ struct FlistEntry {
   char     value[ 2 ];
 
   void init( void ) {
+    this->form     = NULL;
     this->flist    = 0;
     this->rec_type = 0;
   }
@@ -92,6 +94,8 @@ struct RvOmmSubmgr : public kv::EvSocket, public kv::EvConnectionNotify,
   const char          ** sub;             /* subject strings */
   size_t                 sub_count;       /* count of sub[] */
   bool                   is_subscribed;   /* sub[] are subscribed */
+  md::MDMsgMem           cvt_mem;
+  md::MDOutput           dbg_out;
 
   void * operator new( size_t, void *ptr ) { return ptr; }
   RvOmmSubmgr( kv::EvPoll &p,  sassrv::EvRvClient &c,

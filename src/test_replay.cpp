@@ -12,6 +12,7 @@
 #include <omm/src_dir.h>
 #include <raikv/ev_publish.h>
 #include <raimd/mf_msg.h>
+#include <raimd/sass.h>
 
 using namespace rai;
 using namespace kv;
@@ -99,8 +100,8 @@ TestReplay::timer_cb( uint64_t, uint64_t ) noexcept
   size_t   sz         = 0;
   uint32_t seqno      = 0;
   int      status     = 0;
-  uint16_t flist      = 0;
-  bool     is_initial = false;
+  uint16_t flist      = 0,
+           msg_type   = UPDATE_TYPE;
 
   for (;;) {
     if ( fgets( subj, sizeof( subj ), this->fp ) == NULL )
@@ -152,14 +153,14 @@ TestReplay::timer_cb( uint64_t, uint64_t ) noexcept
   switch ( m->get_type_id() ) {
     case MARKETFEED_TYPE_ID: {
       MktfdMsg & mf = *(MktfdMsg *) m;
-      is_initial = ( mf.func == 340 );
+      msg_type = mf_func_to_sass_msg_type( mf.func );
       flist = mf.flist;
       seqno = mf.rtl;
       break;
     }
     case RWF_MSG_TYPE_ID: {
       RwfMsg & rwf = *(RwfMsg *) m;
-      is_initial = ( rwf.msg.msg_class == REFRESH_MSG_CLASS );
+      msg_type = rwf_to_sass_msg_type( rwf );
       RwfMsg * fl = rwf.get_container_msg();
       if ( fl != NULL )
         flist = fl->fields.flist;
@@ -167,15 +168,31 @@ TestReplay::timer_cb( uint64_t, uint64_t ) noexcept
         seqno = rwf.msg.seq_num;
       break;
     }
+    default: {
+      MDFieldReader rd( *m );
+      if ( rd.find( SASS_MSG_TYPE, SASS_MSG_TYPE_LEN ) )
+        rd.get_uint( msg_type );
+      if ( rd.find( SASS_SEQ_NO, SASS_SEQ_NO_LEN ) )
+        rd.get_uint( seqno );
+      break;
+    }
   }
-  RwfMsgClass  msg_class = ( is_initial ? REFRESH_MSG_CLASS :
-                                          UPDATE_MSG_CLASS );
+  RwfMsgClass  msg_class = ( msg_type == INITIAL_TYPE ? REFRESH_MSG_CLASS :
+                                                        UPDATE_MSG_CLASS );
   uint32_t     stream_id = MDDict::dict_hash( subj, slen );
   char         tmp_buf[ 1024 ];
   RwfMsgWriter w( mem, this->dict.rdm_dict, tmp_buf, sizeof( tmp_buf ),
                   msg_class, MARKET_PRICE_DOMAIN, stream_id );
-  if ( is_initial )
+  if ( msg_type == INITIAL_TYPE )
     w.set( X_CLEAR_CACHE, X_REFRESH_COMPLETE );
+  else {
+    if ( msg_type == CLOSING_TYPE )
+      w.add_update( UPD_TYPE_CLOSING_RUN );
+    else if ( msg_type == CORRECT_TYPE )
+      w.add_update( UPD_TYPE_CORRECTION );
+    else if ( msg_type == VERIFY_TYPE )
+      w.add_update( UPD_TYPE_VERIFY );
+  }
   if ( seqno != 0 )
     w.add_seq_num( seqno );
   w.add_msg_key()
@@ -187,7 +204,7 @@ TestReplay::timer_cb( uint64_t, uint64_t ) noexcept
     fl.add_flist( flist );
   status = w.err;
   if ( status == 0 )
-    status = fl.convert_msg( *m );
+    status = fl.convert_msg( *m, true );
   if ( status == 0 )
     w.end_msg();
   if ( status == 0 )
