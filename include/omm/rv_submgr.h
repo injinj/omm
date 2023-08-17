@@ -82,20 +82,20 @@ struct FlistTab : public kv::RouteVec<FlistEntry> {};
 /* rv client callback closure */
 struct RvOmmSubmgr : public kv::EvSocket, public kv::EvConnectionNotify,
                      public sassrv::RvClientCB,
-                     public sassrv::SubscriptionListener {
-  sassrv::EvRvClient   & client;          /* connection to rv */
-  kv::RoutePublish     & sub_route;
-  sassrv::SubscriptionDB sub_db;
-  OmmDict              & dict;
-  ReplyTab               reply_tab[ MAX_FMT_PREFIX ];
-  WildTab                wild_tab;
-  FlistTab               flist_tab;
-  kv::UIntHashTab      * coll_ht;
-  const char          ** sub;             /* subject strings */
-  size_t                 sub_count;       /* count of sub[] */
-  bool                   is_subscribed;   /* sub[] are subscribed */
-  md::MDMsgMem           cvt_mem;
-  md::MDOutput           dbg_out;
+                     public sassrv::RvSubscriptionListener {
+  sassrv::EvRvClient     & client;          /* connection to rv */
+  kv::RoutePublish       & sub_route;
+  sassrv::RvSubscriptionDB sub_db;
+  OmmDict                & dict;
+  ReplyTab                 reply_tab[ MAX_FMT_PREFIX ];
+  WildTab                  wild_tab;
+  FlistTab                 flist_tab;
+  kv::UIntHashTab        * coll_ht;
+  const char            ** sub;             /* subject strings */
+  size_t                   sub_count;       /* count of sub[] */
+  bool                     is_subscribed;   /* sub[] are subscribed */
+  md::MDMsgMem             cvt_mem;
+  md::MDOutput             dbg_out;
 
   void * operator new( size_t, void *ptr ) { return ptr; }
   RvOmmSubmgr( kv::EvPoll &p,  sassrv::EvRvClient &c,
@@ -108,7 +108,7 @@ struct RvOmmSubmgr : public kv::EvSocket, public kv::EvConnectionNotify,
   void start_subscriptions( void ) noexcept;
   /* when signalled, unsubscribe */
   void on_unsubscribe( void ) noexcept;
-  uint32_t sub_refcnt( int fmt,  sassrv::Subscription &sub ) noexcept;
+  uint32_t sub_refcnt( int fmt,  sassrv::RvSubscription &sub ) noexcept;
   void add_collision( uint32_t h ) noexcept;
   bool rem_collision( uint32_t h ) noexcept;
   /* when disconnected */
@@ -117,9 +117,9 @@ struct RvOmmSubmgr : public kv::EvSocket, public kv::EvConnectionNotify,
   /* RvClientCB */
   virtual bool on_rv_msg( kv::EvPublish &pub ) noexcept;
   /* SubscriptionListener  */
-  virtual void on_listen_start( sassrv::StartListener &add ) noexcept;
-  virtual void on_listen_stop ( sassrv::StopListener  &rem ) noexcept;
-  virtual void on_snapshot    ( sassrv::SnapListener  &snp ) noexcept;
+  virtual void on_listen_start( Start &add ) noexcept;
+  virtual void on_listen_stop ( Stop  &rem ) noexcept;
+  virtual void on_snapshot    ( Snap  &snp ) noexcept;
   /* EvSocket */
   virtual bool on_msg( kv::EvPublish &pub ) noexcept;
   virtual bool timer_expire( uint64_t tid,  uint64_t eid ) noexcept;

@@ -37,7 +37,7 @@ enum {
   RVMSG_PREFIX   = 2,
   RWFMSG_PREFIX  = 3
 };
-static inline int pref_match( const Subscription &s,
+static inline int pref_match( const RvSubscription &s,
                               const char *&sub,  size_t &sublen,
                               uint32_t &h ) {
   const char * val = s.value;
@@ -82,7 +82,7 @@ struct FmtSub {
     this->value = this->buf;
     this->set( fmt, s, l );
   }
-  FmtSub( int fmt,  const Subscription &sub ) {
+  FmtSub( int fmt,  const RvSubscription &sub ) {
     this->value = this->buf;
     this->set( fmt, sub );
   }
@@ -90,7 +90,7 @@ struct FmtSub {
     if ( this->value != this->buf )
       ::free( this->value );
   }
-  void set( int fmt,  const Subscription &sub ) {
+  void set( int fmt,  const RvSubscription &sub ) {
     const char * val = sub.value;
     this->set( fmt, &val[ FMT_PREF_LEN ], sub.len - FMT_PREF_LEN );
   }
@@ -362,7 +362,7 @@ RvOmmSubmgr::on_msg( EvPublish &pub ) noexcept
       uint32_t h = pub.hash[ cnt ];
       if ( pub.subj_hash == h ) {
         for ( i = 0; i < MAX_FMT_PREFIX; i++ ) {
-          Subscription * entry;
+          RvSubscription * entry;
           entry = this->sub_db.sub_tab.find( hash[ i ], sub[ i ].value,
                                              sub[ i ].len );
           if ( entry != NULL && entry->refcnt != 0 )
@@ -413,7 +413,7 @@ void RvOmmSubmgr::release( void ) noexcept {}
 void RvOmmSubmgr::on_write_ready( void ) noexcept {}
 
 void
-RvOmmSubmgr::on_listen_start( StartListener &add ) noexcept
+RvOmmSubmgr::on_listen_start( Start &add ) noexcept
 {
   if ( add.reply_len == 0 ) {
     printf( "%sstart %.*s refs %u from %.*s\n",
@@ -432,7 +432,7 @@ RvOmmSubmgr::on_listen_start( StartListener &add ) noexcept
   uint32_t     h;
   int          fmt = pref_match( add.sub, sub, sublen, h );
 
-  if ( ! SubscriptionDB::is_rv_wildcard( sub, sublen ) ) {
+  if ( ! RvSubscriptionDB::is_rv_wildcard( sub, sublen ) ) {
     ReplyTab & tab    = this->reply_tab[ fmt ];
     NotifySub  nsub( sub, sublen, NULL, 0, h, 0, 'V', *this );
     RouteLoc   loc;
@@ -501,7 +501,7 @@ RvOmmSubmgr::on_listen_start( StartListener &add ) noexcept
 }
 
 void
-RvOmmSubmgr::on_listen_stop( StopListener &rem ) noexcept
+RvOmmSubmgr::on_listen_stop( Stop &rem ) noexcept
 {
   printf( "%sstop %.*s refs %u from %.*s%s\n",
     rem.is_listen_stop ? "listen_" : "assert_",
@@ -513,7 +513,7 @@ RvOmmSubmgr::on_listen_stop( StopListener &rem ) noexcept
   uint32_t     h;
   int          fmt = pref_match( rem.sub, sub, sublen, h );
 
-  if ( ! SubscriptionDB::is_rv_wildcard( sub, sublen ) ) {
+  if ( ! RvSubscriptionDB::is_rv_wildcard( sub, sublen ) ) {
     ReplyTab & tab    = this->reply_tab[ fmt ];
     NotifySub  nsub( sub, sublen, NULL, 0, h, 0, 'V', *this );
     uint32_t   refcnt = this->sub_refcnt( fmt, rem.sub );
@@ -592,7 +592,7 @@ RvOmmSubmgr::rem_collision( uint32_t h ) noexcept
 }
 
 void
-RvOmmSubmgr::on_snapshot( SnapListener &snp ) noexcept
+RvOmmSubmgr::on_snapshot( Snap &snp ) noexcept
 {
   printf( "snap %.*s reply %.*s refs %u flags %u\n",
     snp.sub.len, snp.sub.value, snp.reply_len, snp.reply, snp.sub.refcnt,
@@ -630,11 +630,11 @@ RvOmmSubmgr::on_snapshot( SnapListener &snp ) noexcept
 }
 
 uint32_t
-RvOmmSubmgr::sub_refcnt( int fmt,  Subscription &sub ) noexcept
+RvOmmSubmgr::sub_refcnt( int fmt,  RvSubscription &sub ) noexcept
 {
-  uint32_t       refcnt = sub.refcnt;
-  FmtSub         next( ( fmt + 1 ) % MAX_FMT_PREFIX, sub );
-  Subscription * entry;
+  uint32_t         refcnt = sub.refcnt;
+  FmtSub           next( ( fmt + 1 ) % MAX_FMT_PREFIX, sub );
+  RvSubscription * entry;
 
   entry = this->sub_db.sub_tab.find( next.hash( 0 ), next.value, next.len );
   if ( entry != NULL )
