@@ -107,10 +107,20 @@ EvOmmClient::send_login_request( void ) noexcept
 RwfElementListWriter &
 EvOmmClient::add_login_request_attrs( RwfElementListWriter &elist ) noexcept
 {
+  PeerAddrStr paddr;
+  char        pos_buf[ 128 ];
+  size_t      off;
+
+  paddr.set_sock_ip( this->fd );
+  off = paddr.len(),
+  ::memcpy( pos_buf, paddr.buf, off );
+  ::memcpy( &pos_buf[ off ], "/net", 5 );
+
   if ( this->app_id != NULL )
     elist.append_string( APP_ID, this->app_id );
   if ( this->app_name != NULL )
     elist.append_string( APP_NAME, this->app_name );
+  elist.append_string( POSITION, pos_buf );
   if ( this->pass != NULL )
     elist.append_string( PASSWD, this->pass );
   if ( this->token != NULL )

@@ -17,11 +17,24 @@ using namespace kv;
 using namespace omm;
 using namespace md;
 
+TestPublish::TestPublish( EvPoll &p,  OmmDict &d,  OmmSourceDB &db ) noexcept
+           : EvSocket( p, p.register_type( "omm_test_pub" ) ),
+             RouteNotify( p.sub_route ), poll( p ), sub_route( p.sub_route ),
+             dict( d ), source_db( db )
+{
+  this->sock_opts = OPT_NO_POLL;
+}
+
 void
 TestPublish::start( void ) noexcept
 {
-  this->omm_sv.sub_route.add_route_notify( *this );
-  this->poll.timer.add_timer_seconds( *this, 5, 1, 0 );
+  int sfd = this->poll.get_null_fd();
+  this->PeerData::init_peer( this->poll.get_next_id(), sfd, -1, NULL,
+                             "omm_test_pub" );
+  this->PeerData::set_name( "omm_test_pub", 12 );
+  this->poll.add_sock( this );
+  this->sub_route.add_route_notify( *this );
+  this->poll.timer.add_timer_seconds( this->fd, 5, 1, 0 );
 }
 
 void
@@ -35,7 +48,7 @@ TestPublish::add_test_source( const char *feed_name,
 
   char         buf[ 1024 ];
   MDMsgMem     mem;
-  RwfMapWriter map( mem, this->omm_sv.dict.rdm_dict, buf, sizeof( buf ) );
+  RwfMapWriter map( mem, this->dict.rdm_dict, buf, sizeof( buf ) );
   RwfState     state = { STREAM_STATE_OPEN, DATA_STATE_OK, 0, { "OK", 2 } };
 
   RwfFilterListWriter
@@ -95,7 +108,7 @@ TestPublish::add_test_source( const char *feed_name,
     if ( m != NULL )
       m->print( &mout );
   }
-  this->omm_sv.add_source( *m );
+  this->source_db.update_source_map( this->start_ns, *m );
 }
 
 void
@@ -233,9 +246,9 @@ TestPublish::initial( const char *reply,  size_t reply_len,  OmmSource *src,
   }
   printf( "pub initial %.*s\n", (int) reply_len, reply );
   EvPublish pub( reply, reply_len, NULL, 0, msg.buf, msg.off,
-                 this->poll.sub_route, this->omm_sv, rt->hash,
+                 this->sub_route, *this, rt->hash,
                  RWF_MSG_TYPE_ID );
-  this->poll.sub_route.forward_msg( pub, NULL );
+  this->sub_route.forward_msg( pub, NULL );
 }
 
 void
@@ -264,13 +277,13 @@ TestPublish::update( OmmSource *src,  const char *ric,  size_t ric_len,
      .end_msg();
   printf( "pub update %.*s\n", (int) rt->len, rt->value );
   EvPublish pub( rt->value, rt->len, NULL, 0, msg.buf, msg.off,
-                 this->poll.sub_route, this->omm_sv, rt->hash,
+                 this->sub_route, *this, rt->hash,
                  RWF_MSG_TYPE_ID );
-  this->poll.sub_route.forward_msg( pub, NULL );
+  this->sub_route.forward_msg( pub, NULL );
 }
 
 bool
-TestPublish::timer_cb( uint64_t, uint64_t ) noexcept
+TestPublish::timer_expire( uint64_t, uint64_t ) noexcept
 {
   RouteLoc loc;
   TestRoute * rt;
@@ -305,4 +318,11 @@ void
 TestPublish::on_punsub( NotifyPattern & ) noexcept
 {
 }
+
+void TestPublish::write( void ) noexcept {}
+void TestPublish::read( void ) noexcept {}
+void TestPublish::process( void ) noexcept {}
+void TestPublish::release( void ) noexcept {}
+void TestPublish::on_write_ready( void ) noexcept {}
+bool TestPublish::on_msg( EvPublish & ) noexcept { return true; }
 

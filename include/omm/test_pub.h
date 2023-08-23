@@ -26,32 +26,38 @@ struct TestRoute {
   void update( uint64_t cur_ns ) noexcept;
 };
 
-struct TestPublish : public RouteNotify, public EvTimerCallback {
-  EvPoll      & poll;
-  OmmDict     & dict;
-  OmmSourceDB & source_db;
-  EvOmmListen & omm_sv;
+struct TestPublish : public EvSocket, public RouteNotify {
+  EvPoll        & poll;
+  RoutePublish  & sub_route;
+  OmmDict       & dict;
+  OmmSourceDB   & source_db;
 
   RouteVec<TestRoute> test_tab;
   
   void * operator new( size_t, void *ptr ) { return ptr; }
-  TestPublish( EvOmmListen *sv )
-    : RouteNotify( sv->poll.sub_route ), poll( sv->poll ),
-      dict( sv->dict ), source_db( sv->x_source_db ), omm_sv( *sv ) {}
+  TestPublish( EvPoll &p,  OmmDict &d,  OmmSourceDB &db ) noexcept;
 
   void add_test_source( const char *feed_name,  uint32_t service_id ) noexcept;
   void start( void ) noexcept;
+  /* Routenotify */
   virtual void on_sub( kv::NotifySub &sub ) noexcept;
   virtual void on_resub( kv::NotifySub &sub ) noexcept;
   virtual void on_unsub( kv::NotifySub &sub ) noexcept;
   virtual void on_psub( kv::NotifyPattern &pat ) noexcept;
   virtual void on_punsub( kv::NotifyPattern &pat ) noexcept;
-  virtual bool timer_cb( uint64_t timer_id,  uint64_t event_id ) noexcept;
   void initial( const char *reply,  size_t reply_len,  OmmSource *src,
                 const char *ric,  size_t ric_len,  uint8_t domain,
                 TestRoute *rt,  bool is_solicited ) noexcept;
   void update( OmmSource *src,  const char *ric,  size_t ric_len,
                uint8_t domain,  TestRoute *rt ) noexcept;
+  /* EvSocket */
+  virtual bool on_msg( kv::EvPublish &pub ) noexcept;
+  virtual bool timer_expire( uint64_t tid,  uint64_t eid ) noexcept;
+  virtual void write( void ) noexcept;
+  virtual void read( void ) noexcept;
+  virtual void process( void ) noexcept;
+  virtual void release( void ) noexcept;
+  virtual void on_write_ready( void ) noexcept;
 };
 
 }

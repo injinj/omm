@@ -19,11 +19,26 @@ using namespace kv;
 using namespace omm;
 using namespace md;
 
+TestReplay::TestReplay( EvPoll &p,  OmmDict &d,  OmmSourceDB &db ) noexcept
+           : EvSocket( p, p.register_type( "omm_test_replay" ) ),
+             poll( p ), sub_route( p.sub_route ),
+             dict( d ), source_db( db ), fp( 0 ), fn( 0 ), buf( 0 ), feed( 0 ),
+             buflen( 0 ), msg_count( 0 ), feed_len( 0 )
+{
+  this->sock_opts = OPT_NO_POLL;
+}
+
 void
 TestReplay::start( void ) noexcept
 {
-  if ( this->fp != NULL )
-    this->poll.timer.add_timer_millis( *this, 100, 1, 0 );
+  if ( this->fp != NULL ) {
+    int sfd = this->poll.get_null_fd();
+    this->PeerData::init_peer( this->poll.get_next_id(), sfd, -1, NULL,
+                               "omm_test_replay" );
+    this->PeerData::set_name( "omm_test_replay", 15 );
+    this->poll.add_sock( this );
+    this->poll.timer.add_timer_millis( this->fd, 100, 1, 0 );
+  }
 }
 
 void
@@ -37,7 +52,7 @@ TestReplay::add_replay_file( const char *feed_name,  uint32_t service_id,
 
   char         buf[ 1024 ];
   MDMsgMem     mem;
-  RwfMapWriter map( mem, this->omm_sv.dict.rdm_dict, buf, sizeof( buf ) );
+  RwfMapWriter map( mem, this->dict.rdm_dict, buf, sizeof( buf ) );
   RwfState     state = { STREAM_STATE_OPEN, DATA_STATE_OK, 0, { "OK", 2 } };
 
   RwfFilterListWriter
@@ -77,7 +92,7 @@ TestReplay::add_replay_file( const char *feed_name,  uint32_t service_id,
     if ( m != NULL )
       m->print( &mout );
   }
-  this->omm_sv.add_source( *m );
+  this->source_db.update_source_map( this->start_ns, *m );
   size_t len  = ::strlen( replay_file ),
          flen = ::strlen( feed_name );
   this->feed_len = flen;
@@ -92,7 +107,7 @@ TestReplay::add_replay_file( const char *feed_name,  uint32_t service_id,
 }
 
 bool
-TestReplay::timer_cb( uint64_t, uint64_t ) noexcept
+TestReplay::timer_expire( uint64_t, uint64_t ) noexcept
 {
   MDMsgMem mem;
   char     subj[ 1024 ],
@@ -216,8 +231,8 @@ TestReplay::timer_cb( uint64_t, uint64_t ) noexcept
      .b( subj, slen ).end();
     uint32_t h = kv_crc_c( p.start, p.len(), 0 );
     EvPublish pub( p.start, p.len(), NULL, 0, w.buf, w.off,
-                   this->poll.sub_route, this->omm_sv, h, RWF_MSG_TYPE_ID );
-    this->poll.sub_route.forward_msg( pub, NULL );
+                   this->sub_route, *this, h, RWF_MSG_TYPE_ID );
+    this->sub_route.forward_msg( pub, NULL );
     this->msg_count++;
   }
   else {
@@ -228,3 +243,9 @@ TestReplay::timer_cb( uint64_t, uint64_t ) noexcept
   return true;
 }
 
+void TestReplay::write( void ) noexcept {}
+void TestReplay::read( void ) noexcept {}
+void TestReplay::process( void ) noexcept {}
+void TestReplay::release( void ) noexcept {}
+void TestReplay::on_write_ready( void ) noexcept {}
+bool TestReplay::on_msg( EvPublish & ) noexcept { return true; }

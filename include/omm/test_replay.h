@@ -8,29 +8,33 @@ using namespace md;
 using namespace kv;
 namespace omm {
 
-struct TestReplay : public EvTimerCallback {
-  EvPoll      & poll;
-  OmmDict     & dict;
-  OmmSourceDB & source_db;
-  EvOmmListen & omm_sv;
-  FILE        * fp;
-  char        * fn,
-              * buf,
-              * feed;
-  size_t        buflen,
-                msg_count,
-                feed_len;
+struct TestReplay : public EvSocket {
+  EvPoll        & poll;
+  RoutePublish  & sub_route;
+  OmmDict       & dict;
+  OmmSourceDB   & source_db;
+  FILE          * fp;
+  char          * fn,
+                * buf,
+                * feed;
+  size_t          buflen,
+                  msg_count,
+                  feed_len;
 
   void * operator new( size_t, void *ptr ) { return ptr; }
-  TestReplay( EvOmmListen *sv )
-    : poll( sv->poll ), dict( sv->dict ), source_db( sv->x_source_db ),
-      omm_sv( *sv ), fp( 0 ), fn( 0 ), buf( 0 ), feed( 0 ), buflen( 0 ),
-      msg_count( 0 ), feed_len( 0 ) {}
+  TestReplay( EvPoll &p,  OmmDict &d,  OmmSourceDB &db ) noexcept;
 
   void add_replay_file( const char *feed_name,  uint32_t service_id,
                         const char *replay_file ) noexcept;
   void start( void ) noexcept;
-  virtual bool timer_cb( uint64_t timer_id,  uint64_t event_id ) noexcept;
+
+  virtual bool on_msg( kv::EvPublish &pub ) noexcept;
+  virtual bool timer_expire( uint64_t tid,  uint64_t eid ) noexcept;
+  virtual void write( void ) noexcept;
+  virtual void read( void ) noexcept;
+  virtual void process( void ) noexcept;
+  virtual void release( void ) noexcept;
+  virtual void on_write_ready( void ) noexcept;
 };
 
 }
