@@ -107,12 +107,13 @@ struct Outsub {
 struct RvOmmSubmgr : public kv::EvSocket, public kv::EvConnectionNotify,
                      public sassrv::RvClientCB,
                      public sassrv::RvSubscriptionListener,
-                     public sassrv::RvFtListener {
+                     public sassrv::RvFtListener, public OmmSrcListener {
   sassrv::EvRvClient     & client;          /* connection to rv */
   kv::RoutePublish       & sub_route;
   sassrv::RvSubscriptionDB sub_db;
   sassrv::RvFt             ft;
   OmmDict                & dict;
+  OmmSourceDB            & source_db;
   InboxReplyTab            reply_tab;
   WildTab                  wild_tab;
   kv::UIntHashTab        * coll_ht;
@@ -129,8 +130,9 @@ struct RvOmmSubmgr : public kv::EvSocket, public kv::EvConnectionNotify,
   md::MDOutput             dbg_out;
   uint64_t                 tid;
   char                     pref[ 16 ];
-  const char            ** feed_wild;       /* subject strings */
-  size_t                   feed_wild_count; /* count of sub[] */
+  const char            ** feed;       /* subject strings */
+  size_t                   feed_count; /* count of sub[] */
+  uint32_t               * feed_map_service;
 
   static const uint32_t PROCESS_EVENTS_SECS = 2,
                         SYNC_JOIN_MS = 1,
@@ -138,13 +140,15 @@ struct RvOmmSubmgr : public kv::EvSocket, public kv::EvConnectionNotify,
 
   void * operator new( size_t, void *ptr ) { return ptr; }
   RvOmmSubmgr( kv::EvPoll &p,  sassrv::EvRvClient &c,
-               OmmDict &d,  uint32_t ft_weight,
+               OmmDict &d,  OmmSourceDB &db,  uint32_t ft_weight,
                const char *prefix,  const char *msg_fmt ) noexcept;
   void update_field_list( FlistEntry &flist,  uint16_t flist_no ) noexcept;
   int convert_to_msg( kv::EvPublish &pub,  uint32_t type_id,
                       FlistEntry &flist,  bool &flist_updated ) noexcept;
   /* after CONNECTED message */
   virtual void on_connect( kv::EvSocket &conn ) noexcept;
+  /* when src updated */
+  virtual void on_src_change( void ) noexcept;
   /* start sub[] with inbox reply */
   void on_start( void ) noexcept;
   /* when signalled, unsubscribe */
@@ -166,6 +170,7 @@ struct RvOmmSubmgr : public kv::EvSocket, public kv::EvConnectionNotify,
                   size_t reply_len ) noexcept;
   void stop_sub( sassrv::RvSubscription &sub,  bool is_ft_deactivate ) noexcept;
   void deactivate_subs( void ) noexcept;
+  void feed_down_subs( void ) noexcept;
   /* SubscriptionListener  */
   virtual void on_listen_start( Start &add ) noexcept;
   virtual void on_listen_stop ( Stop  &rem ) noexcept;

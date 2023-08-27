@@ -23,38 +23,6 @@ using namespace sassrv;
 using namespace omm;
 using namespace md;
 
-#if 0
-static const char *pref[] = {
-  "_TIC.",
-  "_TIB.",
-  "_RVM.",
-  "_RWF."
-};
-static const size_t FMT_PREF_LEN = 5;
-
-enum {
-  SASS_PREFIX    = 0,
-  TIBMSG_PREFIX  = 1,
-  RVMSG_PREFIX   = 2,
-  RWFMSG_PREFIX  = 3
-};
-
-PrefMatch::PrefMatch( RvSubscription &s ) noexcept
-         : script( s )
-{
-  const char * val = s.value;
-  this->sub    = &val[ FMT_PREF_LEN ];
-  this->sublen = s.len - FMT_PREF_LEN;
-  switch ( val[ 3 ] ) {
-    default:
-    case 'C': this->fmt = SASS_PREFIX; break;
-    case 'B': this->fmt = TIBMSG_PREFIX; break;
-    case 'M': this->fmt = RVMSG_PREFIX; break;
-    case 'F': this->fmt = RWFMSG_PREFIX; break;
-  }
-}
-#endif
-
 uint32_t
 Insub::hash( void ) const noexcept
 {
@@ -75,14 +43,14 @@ static const uint32_t fmt_type_id[] = {
 };
 
 RvOmmSubmgr::RvOmmSubmgr( kv::EvPoll &p,  sassrv::EvRvClient &c,
-                          OmmDict &d,  uint32_t ft_weight,
+                          OmmDict &d,  OmmSourceDB &db,  uint32_t ft_weight,
                           const char *prefix,  const char *msg_fmt ) noexcept
   : EvSocket( p, p.register_type( "omm_submgr" ) ),
     client( c ), sub_route( c.sub_route ), sub_db( c, this ),
-    ft( c, this ), dict( d ), coll_ht( 0 ), active_ht( 0 ), fmt( 0 ),
-    update_fmt( 0 ), pref_len( 0 ), ft_rank( 0 ), is_stopped( false ),
-    is_running( false ), is_finished( false ), tid( 0 ), feed_wild( 0 ),
-    feed_wild_count( 0 )
+    ft( c, this ), dict( d ), source_db( db ), coll_ht( 0 ), active_ht( 0 ),
+    fmt( 0 ), update_fmt( 0 ), pref_len( 0 ), ft_rank( 0 ), is_stopped( false ),
+    is_running( false ), is_finished( false ), tid( 0 ), feed( 0 ),
+    feed_count( 0 ), feed_map_service( 0 )
 {
   if ( prefix != NULL ) {
     for ( this->pref_len = 0; this->pref_len < 15; ) {
@@ -136,27 +104,90 @@ RvOmmSubmgr::RvOmmSubmgr( kv::EvPoll &p,  sassrv::EvRvClient &c,
 
   this->ft_param.weight = ft_weight;
   this->active_ht = ActiveHT::resize( NULL );
+  db.add_source_listener( this );
 }
+
+void
+RvOmmSubmgr::on_src_change( void ) noexcept
+{
+  OmmSourceDB &db = this->source_db;
+  uint64_t     mapped = 0;
+  size_t       i, j;
+  if ( this->poll.quit )
+    return;
+  if ( this->feed_count != 0 ) {
+    if ( this->feed_map_service == NULL ) {
+      size_t sz = sizeof( this->feed_map_service[ 0 ] ) * this->feed_count;
+      this->feed_map_service = (uint32_t *) ::malloc( sz );
+      ::memset( this->feed_map_service, 0, sz );
+    }
+    for ( i = 0; i < this->feed_count; i++ ) {
+      const char * feed     = this->feed[ i ];
+      size_t       feed_len = ::strlen( feed );
+      for ( j = 0; j < db.source_list.count; j++ ) {
+        for ( OmmSource * src = db.source_list.ptr[ j ].hd; src != NULL;
+              src = src->next ) {
+          const char * svc     = src->info.service_name;
+          size_t       svc_len = src->info.service_name_len;
+
+          if ( feed_len == svc_len &&
+               ::memcmp( feed, svc, feed_len ) == 0 ) {
+            if ( this->feed_map_service[ i ] != src->service_id ) {
+              printf( "Feed: " );
+              if ( this->pref_len > 0 )
+                printf( "%.*s", (int) this->pref_len, this->pref );
+              printf( "%.*s.> using service %u\n",
+                      (int) feed_len, feed, src->service_id );
+              this->feed_map_service[ i ] = src->service_id;
+            }
+            mapped |= (uint64_t) 1 << i;
+          }
+        }
+      }
+    }
+    for ( i = 0; i < this->feed_count; i++ ) {
+      if ( ( mapped & ( (uint64_t) 1 << i ) ) == 0 ) {
+        const char * feed     = this->feed[ i ];
+        size_t       feed_len = ::strlen( feed );
+        printf( "Feed: " );
+        if ( this->pref_len > 0 )
+          printf( "%.*s", (int) this->pref_len, this->pref );
+        printf( "%.*s.> does not map to a service\n",
+                (int) feed_len, feed );
+        this->feed_map_service[ i ] = 0;
+      }
+    }
+    if ( mapped != 0 ) {
+      if ( ! this->is_running )
+        this->ft.activate();
+    }
+    else {
+      if ( this->is_running )
+        this->ft.deactivate();
+    }
+  }
+}
+
 
 void
 RvOmmSubmgr::on_ft_change( uint8_t action ) noexcept
 {
-  bool check_rank = false;
-  printf( "FT: %s ", RvFt::action_str[ action ] );
+  printf( "FT action: %s ", RvFt::action_str[ action ] );
   this->ft.ft_queue.print();
   printf( "\n" );
 
-  if ( action == RvFt::ACTION_FINISH )
+  if ( action == RvFt::ACTION_FINISH ) {
     this->is_finished = true;
+    this->is_running  = false;
+  }
   else if ( action == RvFt::ACTION_ACTIVATE ||
             action == RvFt::ACTION_DEACTIVATE ) {
     this->is_running = true;
-    check_rank = true;
   }
-  else if ( action == RvFt::ACTION_UPDATE ) {
-    check_rank = this->is_running;
+  else if ( action == RvFt::ACTION_LISTEN ) {
+    this->is_running = false;
   }
-  if ( check_rank ) {
+  if ( this->is_running || this->ft_rank > 0 ) {
     uint32_t new_rank = this->ft.me.pos;
     if ( this->ft_rank != new_rank ) {
       this->ft_rank = new_rank;
@@ -164,6 +195,9 @@ RvOmmSubmgr::on_ft_change( uint8_t action ) noexcept
         this->activate_subs();
       else
         this->deactivate_subs();
+      if ( new_rank == 0 && this->ft.state_count.member_count() == 0 ) {
+        printf( "No other FT members\n" );
+      }
     }
     if ( new_rank == 1 && this->ft.ft_queue.count > 1 &&
          action == RvFt::ACTION_UPDATE ) {
@@ -190,12 +224,11 @@ void
 RvOmmSubmgr::on_connect( EvSocket &conn ) noexcept
 {
   int len = (int) conn.get_peer_address_strlen();
-  printf( "Connected: %.*s\n", len, conn.peer_address.buf );
+  printf( "RvClient connected: %.*s\n", len, conn.peer_address.buf );
   fflush( stdout );
-  size_t count = ( this->feed_wild_count == 0 ? 1 : this->feed_wild_count );
+  size_t count = ( this->feed_count == 0 ? 1 : this->feed_count );
   for ( size_t i = 0; i < count; i++ ) {
-    const char *s = ( i == this->feed_wild_count ? ">"
-                      : this->feed_wild[ i ] );
+    const char *s = ( i == this->feed_count ? ">" : this->feed[ i ] );
     Outsub tmp;
     tmp.set( this->pref, this->pref_len, s, ::strlen( s ), this->cvt_mem );
     this->sub_db.add_wildcard( tmp.value );
@@ -215,6 +248,21 @@ RvOmmSubmgr::on_start( void ) noexcept
     this->ft_param.user = this->client.userid;
     this->ft_param.user_len = ::strlen( this->client.userid );
   }
+  if ( this->feed_count != 0 ) { /* wait for feed to map to a src */
+    this->ft_param.join_ms = 0;
+    const char *s   = this->feed[ 0 ];
+    size_t      len = ::strlen( s );
+    if ( len > 2 && ::strcmp( &s[ len - 2 ], ".>" ) == 0 )
+      len -= 2;
+    char * ftsub = (char *) ::malloc( 4 + len + 1 );
+    ::memcpy( ftsub, "_FT.", 4 );
+    ::memcpy( &ftsub[ 4 ], s, len );
+    ftsub[ 4 + len ] = '\0';
+    this->ft_param.ft_sub = ftsub;
+    this->ft_param.ft_sub_len = 4 + len; /* _FT.FEED */
+  }
+  printf( "Start FT subject=\"%.*s\"\n", (int) this->ft_param.ft_sub_len,
+          this->ft_param.ft_sub );
   this->ft.start( this->ft_param );
   this->sub_db.start_subscriptions( false );
   this->poll.update_time_ns();
@@ -254,15 +302,16 @@ is_rwf_solicited( EvPublish &pub ) noexcept
 
 template<class Writer>
 void append_hdr( Writer &w,  MDFormClass *form,  uint16_t msg_type,
-                 uint16_t rec_type,  uint16_t seqno,  uint16_t status,
-                 const char *subj,  size_t sublen )
+                 uint16_t rec_type,  bool has_seq,  uint16_t seqno,
+                 uint16_t status,  const char *subj,  size_t sublen ) noexcept
 {
   if ( msg_type != INITIAL_TYPE || form == NULL ) {
     w.append_uint( SASS_MSG_TYPE  , SASS_MSG_TYPE_LEN  , msg_type );
     if ( rec_type != 0 )
       w.append_uint( SASS_REC_TYPE, SASS_REC_TYPE_LEN  , rec_type );
-    w.append_uint( SASS_SEQ_NO    , SASS_SEQ_NO_LEN    , seqno )
-     .append_uint( SASS_REC_STATUS, SASS_REC_STATUS_LEN, status );
+    if ( has_seq )
+      w.append_uint( SASS_SEQ_NO  , SASS_SEQ_NO_LEN    , seqno );
+    w.append_uint( SASS_REC_STATUS, SASS_REC_STATUS_LEN, status );
   }
   else {
     const MDFormEntry * e = form->entries;
@@ -280,6 +329,12 @@ void append_hdr( Writer &w,  MDFormClass *form,  uint16_t msg_type,
   }
 }
 
+template<class Writer>
+void append_status( Writer &w,  uint16_t msg_type,  uint16_t status ) noexcept
+{
+  w.append_uint( SASS_MSG_TYPE  , SASS_MSG_TYPE_LEN  , msg_type );
+  w.append_uint( SASS_REC_STATUS, SASS_REC_STATUS_LEN, status );
+}
 
 void
 RvOmmSubmgr::update_field_list( FlistEntry &flist,  uint16_t flist_no ) noexcept
@@ -316,28 +371,57 @@ RvOmmSubmgr::convert_to_msg( EvPublish &pub,  uint32_t type_id,
     return Err::INVALID_MSG;
 
   int          status;
-  uint64_t     seq_num  = ( m->msg.test( X_HAS_SEQ_NUM ) ? m->msg.seq_num : 0 );
-  RwfMsg     * fields   = m->get_container_msg();
-  const char * name     = NULL;
-  size_t       name_len = 0;
-  uint16_t     msg_type = UPDATE_TYPE;
+  bool         has_seq    = m->msg.test( X_HAS_SEQ_NUM );
+  uint64_t     seq_num    = ( has_seq ?  m->msg.seq_num : 0 );
+  RwfMsg     * fields     = m->get_container_msg();
+  const char * name       = NULL;
+  size_t       name_len   = 0;
+  uint16_t     msg_type   = UPDATE_TYPE,
+               rec_status = OK_STATUS;
 
   if ( m->msg.msg_class == REFRESH_MSG_CLASS ) {
     name     = m->msg.msg_key.name;
     name_len = m->msg.msg_key.name_len;
     msg_type = INITIAL_TYPE;
+    if ( fields != NULL ) {
+      MDFieldReader rd( *fields );
+      MDName nm;
+      if ( rd.first( nm ) && nm.equals( SASS_MSG_TYPE, SASS_MSG_TYPE_LEN ) ) {
+        rd.get_uint( msg_type );
+        for ( int i = 0; i < 3 && rd.next( nm ); i++ ) {
+          if ( nm.equals( SASS_REC_STATUS, SASS_REC_STATUS_LEN ) ) {
+            char buf[ 32 ];
+            size_t buflen = sizeof( buf );
+            if ( rd.get_string( buf, sizeof( buf ), buflen ) ) {
+              rec_status = sass_rec_status_val( buf, buflen );
+              if ( rec_status == NOT_FOUND_STATUS && msg_type == VERIFY_TYPE ) {
+                has_seq  = false;
+                msg_type = TRANSIENT_TYPE;
+              }
+            }
+            break;
+          }
+        }
+      }
+    }
+  }
+  else if ( m->msg.msg_class == STATUS_MSG_CLASS ) {
+    if ( m->msg.state.stream_state != STREAM_STATE_OPEN )
+      msg_type = DROP_TYPE;
+    else
+      msg_type = TRANSIENT_TYPE;
+    rec_status = rwf_code_to_sass_rec_status( *m );
   }
   else {
     msg_type = rwf_to_sass_msg_type( *m );
   }
-  if ( fields == NULL )
-    return Err::BAD_SUB_MSG;
-
-  if ( fields->base.type_id == RWF_FIELD_LIST &&
+  if ( fields != NULL ) {
+    if ( fields->base.type_id == RWF_FIELD_LIST &&
        ( fields->fields.flags & RwfFieldListHdr::HAS_FIELD_LIST_INFO ) != 0 ) {
-    if ( flist.flist != fields->fields.flist ) {
-      this->update_field_list( flist, fields->fields.flist );
-      flist_updated = true;
+      if ( flist.flist != fields->fields.flist ) {
+        this->update_field_list( flist, fields->fields.flist );
+        flist_updated = true;
+      }
     }
   }
   size_t sz = pub.msg_len + 1024;
@@ -346,8 +430,8 @@ RvOmmSubmgr::convert_to_msg( EvPublish &pub,  uint32_t type_id,
   if ( type_id == RVMSG_TYPE_ID ) {
     RvMsgWriter w( this->cvt_mem, buf_ptr, sz );
     append_hdr<RvMsgWriter>( w, flist.form, msg_type, flist.rec_type,
-                             seq_num, 0, name, name_len );
-    if ( (status = w.convert_msg( *fields, true )) != 0 )
+                             has_seq, seq_num, rec_status, name, name_len );
+    if ( fields != NULL && (status = w.convert_msg( *fields, true )) != 0 )
       return status;
     pub.msg     = w.buf;
     pub.msg_len = w.update_hdr();
@@ -357,8 +441,8 @@ RvOmmSubmgr::convert_to_msg( EvPublish &pub,  uint32_t type_id,
   if ( type_id == TIBMSG_TYPE_ID ) {
     TibMsgWriter w( this->cvt_mem, buf_ptr, sz );
     append_hdr<TibMsgWriter>( w, flist.form, msg_type, flist.rec_type,
-                              seq_num, 0, name, name_len );
-    if ( (status = w.convert_msg( *fields, true )) != 0 )
+                              has_seq, seq_num, rec_status, name, name_len );
+    if ( fields != NULL && (status = w.convert_msg( *fields, true )) != 0 )
       return status;
     pub.msg     = w.buf;
     pub.msg_len = w.update_hdr();
@@ -366,15 +450,15 @@ RvOmmSubmgr::convert_to_msg( EvPublish &pub,  uint32_t type_id,
     return w.err;
   }
   /*if ( type_id == TIB_SASS_TYPE_ID ) {*/
-  if ( fields->base.type_id != RWF_FIELD_LIST ) {
+  if ( fields != NULL && fields->base.type_id != RWF_FIELD_LIST ) {
     fprintf( stderr, "unable to convert type %u to sass qform\n",
              fields->base.type_id );
     return Err::BAD_SUB_MSG;
   }
     TibSassMsgWriter w( this->cvt_mem, this->dict.cfile_dict, buf_ptr, sz );
     append_hdr<TibSassMsgWriter>( w, flist.form, msg_type, flist.rec_type,
-                                  seq_num, 0, name, name_len );
-    if ( (status = w.convert_msg( *fields, true )) != 0 )
+                                  has_seq, seq_num, rec_status, name, name_len);
+    if ( fields != NULL && (status = w.convert_msg( *fields, true )) != 0 )
       return status;
     pub.msg     = w.buf;
     pub.msg_len = w.update_hdr();
@@ -676,6 +760,8 @@ void
 RvOmmSubmgr::deactivate_subs( void ) noexcept
 {
   RouteLoc loc;
+  if ( this->ft_rank == 0 && this->ft.state_count.member_count() == 0 )
+    this->feed_down_subs();
   for ( RvSubscription *sub = this->sub_db.sub_tab.first( loc ); sub != NULL;
         sub = this->sub_db.sub_tab.next( loc ) ) {
     if ( sub->refcnt == 0 )
@@ -684,6 +770,46 @@ RvOmmSubmgr::deactivate_subs( void ) noexcept
   }
   /*this->active_ht->clear_all();
   this->reply_tab.release();*/
+}
+
+void
+RvOmmSubmgr::feed_down_subs( void ) noexcept
+{
+  RouteLoc loc;
+  uint32_t type_id = this->update_fmt;
+  for ( RvSubscription *sub = this->sub_db.sub_tab.first( loc ); sub != NULL;
+        sub = this->sub_db.sub_tab.next( loc ) ) {
+    if ( sub->refcnt == 0 )
+      continue;
+    if ( RvSubscriptionDB::is_rv_wildcard( sub->value, sub->len ) )
+      continue;
+
+    this->cvt_mem.reuse();
+    size_t sz = 64;
+    void * buf_ptr = this->cvt_mem.make( sz );
+    EvPublish pub( sub->value, sub->len, NULL, 0, NULL, 0,
+                   this->client.sub_route, this->client, 0, type_id );
+
+    if ( type_id == RVMSG_TYPE_ID ) {
+      RvMsgWriter w( this->cvt_mem, buf_ptr, sz );
+      append_status<RvMsgWriter>( w, TRANSIENT_TYPE, FEED_DOWN_STATUS );
+      pub.msg     = w.buf;
+      pub.msg_len = w.update_hdr();
+    }
+    if ( type_id == TIBMSG_TYPE_ID ) {
+      TibMsgWriter w( this->cvt_mem, buf_ptr, sz );
+      append_status<TibMsgWriter>( w, TRANSIENT_TYPE, FEED_DOWN_STATUS );
+      pub.msg     = w.buf;
+      pub.msg_len = w.update_hdr();
+    }
+    else {
+      TibSassMsgWriter w( this->cvt_mem, this->dict.cfile_dict, buf_ptr, sz );
+      append_status<TibSassMsgWriter>( w, TRANSIENT_TYPE, FEED_DOWN_STATUS );
+      pub.msg     = w.buf;
+      pub.msg_len = w.update_hdr();
+    }
+    this->client.publish( pub );
+  }
 }
 
 void
@@ -822,7 +948,7 @@ RvOmmSubmgr::on_shutdown( EvSocket &conn,  const char *err,
                           size_t errlen ) noexcept
 {
   int len = (int) conn.get_peer_address_strlen();
-  printf( "Shutdown: %.*s %.*s\n",
+  printf( "RvClient shutdown: %.*s %.*s\n",
           len, conn.peer_address.buf, (int) errlen, err );
   /* if disconnected by tcp, usually a reconnect protocol, but this just exits*/
   if ( this->poll.quit == 0 )

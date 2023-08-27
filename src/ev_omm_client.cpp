@@ -22,7 +22,7 @@ EvOmmClient::EvOmmClient( EvPoll &p,  OmmDict &d,  OmmSourceDB &db ) noexcept
     dict_in_progress( 0 ), next_stream_id( 10 ),
     no_dictionary( false ), have_dictionary( false ),
     app_name( 0 ), app_id( 0 ), user( 0 ), pass( 0 ),
-    instance_id( 0 ), token( 0 )
+    instance_id( 0 ), token( 0 ), tid( 0 )
 {
 }
 bool OmmClientCB::on_omm_msg( const char *,  size_t ,  uint32_t , 
@@ -72,6 +72,7 @@ EvOmmClient::connect( EvOmmClientParameters &p,  EvConnectionNotify *n,
   }
   if ( EvTcpConnection::connect( *this, daemon, port, p.opts ) != 0 )
     return false;
+  this->tid         = this->poll.current_mono_ns();
   this->init_streams();
   this->notify      = n;
   this->cb          = c;
@@ -145,6 +146,7 @@ EvOmmClient::process( void ) noexcept
   this->push( EV_CLOSE );
 }
 
+static const uint64_t PING_TIMER_EVENT = 1;
 bool
 EvOmmClient::dispatch_msg( IpcHdr &ipc,  char *buf ) noexcept
 {
@@ -196,10 +198,8 @@ EvOmmClient::dispatch_msg( IpcHdr &ipc,  char *buf ) noexcept
         if ( this->max_frag_size > 0xffff - 10 )
           this->max_frag_size = 0xffff - 10;
       }
-      static const uint64_t PING_TIMER_ID = 1,
-                            PING_TIMER_EVENT = 1;
       this->poll.timer.add_timer_millis( this->fd, rec.ping_timeout * 1000 / 2,
-                                         PING_TIMER_ID, PING_TIMER_EVENT );
+                                         this->tid, PING_TIMER_EVENT );
       this->send_login_request();
       continue;
     }
@@ -272,6 +272,10 @@ EvOmmClient::release( void ) noexcept
   if ( is_omm_debug )
     printf( "release %.*s\n", (int) this->get_peer_address_strlen(),
             this->peer_address.buf );
+  if ( this->cb == NULL )
+    this->EvOmmConn::sub_route.remove_route_notify( *this );
+  if ( this->notify != NULL )
+    this->notify->on_shutdown( *this, NULL, 0 );
   if ( this->login != NULL ) {
     delete this->login;
     this->login = NULL;
@@ -280,26 +284,30 @@ EvOmmClient::release( void ) noexcept
     delete this->dict_in_progress;
     this->dict_in_progress = NULL;
   }
-  if ( this->cb == NULL )
-    this->EvOmmConn::sub_route.remove_route_notify( *this );
+  this->release_streams();
   this->EvConnection::release_buffers();
 }
 
 void
 EvOmmClient::process_close( void ) noexcept
 {
-  printf( "close %.*s\n", (int) this->get_peer_address_strlen(),
-          this->peer_address.buf );
-  if ( this->poll.quit == 0 )
-    this->poll.quit = 1;
+  if ( is_omm_debug )
+    printf( "close %.*s\n", (int) this->get_peer_address_strlen(),
+            this->peer_address.buf );
+  this->poll.timer.remove_timer( this->fd, this->tid, PING_TIMER_EVENT );
+  this->tid = 0;
+  /*if ( this->poll.quit == 0 )
+    this->poll.quit = 1;*/
   this->EvSocket::process_close();
 }
 
 bool
-EvOmmClient::timer_expire( uint64_t, uint64_t ) noexcept
+EvOmmClient::timer_expire( uint64_t timer_id, uint64_t ) noexcept
 {
   /* send ping */
   static const uint8_t ping[ 3 ] = { 0, 3, IPC_DATA };
+  if ( this->tid != timer_id )
+    return false;
   this->append( ping, sizeof( ping ) );
   this->idle_push_write();
   return true;

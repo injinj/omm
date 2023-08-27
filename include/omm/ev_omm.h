@@ -38,7 +38,6 @@ struct EvOmmListen : public kv::EvTcpListen {
   EvOmmListen( kv::EvPoll &p,  OmmDict &d,  OmmSourceDB &db,
                kv::RoutePublish &sr ) noexcept;
   virtual kv::EvSocket *accept( void ) noexcept;
-  void add_source( md::RwfMsg &map ) noexcept;
 };
 
 struct OmmRoute {
@@ -72,6 +71,13 @@ struct OmmSubject {
 struct TempBuf {
   uint8_t * msg; /* pre allocated on connect stream buf */
   size_t    len;
+};
+
+struct OmmSrcListener {
+  OmmSrcListener * next,
+                 * back;
+  OmmSrcListener() : next( 0 ), back( 0 ) {}
+  virtual void on_src_change( void ) noexcept;
 };
 
 struct EvOmmConn : public kv::EvConnection {

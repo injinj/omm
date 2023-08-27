@@ -289,16 +289,36 @@ struct SourceRoute {
 };
 
 typedef struct kv::DLinkList<OmmSource> SourceList;
+typedef struct kv::DLinkList<OmmSrcListener> OmmSrcListenerList;
+
+struct UpdSrcCnt {
+  uint32_t new_src_cnt,
+           rem_src_cnt;
+  UpdSrcCnt() : new_src_cnt( 0 ), rem_src_cnt( 0 ) {}
+  UpdSrcCnt( const UpdSrcCnt &x ) {
+    this->new_src_cnt = x.new_src_cnt;
+    this->rem_src_cnt = x.rem_src_cnt;
+  }
+  UpdSrcCnt& operator=( const UpdSrcCnt &x ) {
+    this->new_src_cnt = x.new_src_cnt;
+    this->rem_src_cnt = x.rem_src_cnt;
+    return *this;
+  }
+};
 
 struct OmmSourceDB {
   kv::RouteVec<SourceRoute>     source_sector_tab;
   kv::ArrayCount<SourceList, 4> source_list;
   kv::UIntHashTab             * service_ht;
+  OmmSrcListenerList            listener_list;
 
   OmmSourceDB() : service_ht( 0 ) {
     this->service_ht = kv::UIntHashTab::resize( NULL );
   }
 
+  void add_source_listener( OmmSrcListener *l ) {
+    this->listener_list.push_tl( l );
+  }
   void add_source( OmmSource *src ) {
     size_t   pos;
     uint32_t i;
@@ -325,10 +345,12 @@ struct OmmSourceDB {
     }
     return NULL;
   }
+  void notify_source_change( void ) noexcept;
   void drop_sources( uint64_t origin ) noexcept;
-  uint32_t update_source_map( uint64_t origin,  RwfMsg &map ) noexcept;
+  UpdSrcCnt update_source_map( uint64_t origin,  RwfMsg &map ) noexcept;
   bool update_source_entry( uint64_t origin,  uint32_t service_id,
                             RwfMsg &entry ) noexcept;
+  bool drop_source_entry( uint64_t origin,  uint32_t service_id ) noexcept;
   bool update_service_info( uint64_t origin,  uint32_t service_id,
                             uint32_t info_id,  bool is_filter_update,
                             RwfMsg &info ) noexcept;

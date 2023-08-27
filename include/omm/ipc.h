@@ -66,7 +66,9 @@ extended = EXTENDED_IPC_FRAG(8)
  */
 
 static const uint32_t IPC_CONN_VER_14        = 23,
-                      RIPC_VERSION_14        = 9;
+                      IPC_CONN_VER_13        = 22,
+                      RIPC_VERSION_14        = 9,
+                      RIPC_VERSION_13        = 8;
 static const uint8_t  IPC_SERVER_PING        = 2,
                       IPC_CLIENT_PING        = 1,
                       IPC_EXTENDED_FLAGS     = 1,
@@ -199,8 +201,9 @@ struct ClientInitRec {
   ClientInitRec() {
     ::memset( (void *) this, 0, sizeof( *this ) );
     this->op_code      = IPC_INIT_CLIENT;
-    this->conn_ver     = IPC_CONN_VER_14;
+    this->conn_ver     = /*IPC_CONN_VER_14;*/ IPC_CONN_VER_13;
     this->ping_timeout = 60;
+    this->key_ex       = 0;
     this->major        = 14;
     this->minor        = 1;
   }
@@ -295,12 +298,12 @@ struct ServerInitRec {
            comp_len;     /* len of version */
   char     comp_ver[ 256 ];
 
-  ServerInitRec() {
+  ServerInitRec( uint32_t ipc_ver = RIPC_VERSION_14 ) {
     ::memset( this, 0, sizeof( *this ) );
     this->op_code       = IPC_EXTENDED_FLAGS;
     this->ext_code      = EXTENDED_IPC_CONNACK;
     this->ipc_10_hdrlen = 10;
-    this->ripc_ver      = RIPC_VERSION_14;
+    this->ripc_ver      = ipc_ver;
     this->max_msg_size  = 6144;
     this->ping_timeout  = 60;
     this->major         = 14;
@@ -378,6 +381,14 @@ struct ServerInitRec {
   }
 };
 
+#if 0
+template <class T>
+static void
+init_component_string( T &rec ) {
+  ::strcpy( rec.comp_ver, "$#eta3.1.0.L1.linux.rrg 64-bit Static" );
+  rec.comp_len = ::strlen( rec.comp_ver );
+}
+#endif
 template <class T>
 static void
 init_component_string( T &rec ) {

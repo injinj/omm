@@ -154,7 +154,8 @@ EvOmmService::dispatch_msg( IpcHdr &ipc,  char *buf ) noexcept
                             PING_TIMER_EVENT = 1;
       this->poll.timer.add_timer_millis( this->fd, c.ping_timeout * 1000 / 2,
                                          PING_TIMER_ID, PING_TIMER_EVENT );
-      ServerInitRec r;
+      ServerInitRec r( c.conn_ver == IPC_CONN_VER_13 ? RIPC_VERSION_13 :
+                                                       RIPC_VERSION_14 );
       init_component_string( r );
       size_t len = r.pack_len();
       char * p = this->alloc( len );

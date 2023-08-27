@@ -64,6 +64,7 @@ struct EvOmmClient : public EvOmmConn, public kv::RouteNotify {
               * pass,
               * instance_id,
               * token;
+  uint64_t      tid;
 
   void * operator new( size_t, void *ptr ) { return ptr; }
   EvOmmClient( kv::EvPoll &p,  OmmDict &d,  OmmSourceDB &db ) noexcept;

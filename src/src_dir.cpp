@@ -48,18 +48,22 @@ EvOmmClient::recv_directory_response( RwfMsg &msg ) noexcept
       fprintf( stderr, "dir response not a map\n" );
     return;
   }
-  uint32_t cnt = this->source_db.update_source_map( this->start_ns, *map );
-  if ( cnt > 0 ) {
-    this->src_count += cnt;
-    this->source_db.print_sources();
-  }
+  UpdSrcCnt cnt = this->source_db.update_source_map( this->start_ns, *map );
+  if ( cnt.new_src_cnt > 0 )
+    this->src_count += cnt.new_src_cnt;
+  if ( cnt.rem_src_cnt > 0 )
+    this->src_count -= cnt.rem_src_cnt;
+  this->source_db.notify_source_change();
+}
+
+void
+OmmSrcListener::on_src_change( void ) noexcept
+{
 }
 
 void
 EvOmmConn::init_streams( void ) noexcept
 {
-  /* may share source_db with EvOmmListen, only standalone EvOmmClient
-   * has it's own source_db */
   this->stream_ht = UIntHashTab::resize( NULL );
 }
 
@@ -74,14 +78,8 @@ EvOmmConn::release_streams( void ) noexcept
   if ( this->src_count != 0 ) {
     this->source_db.drop_sources( this->start_ns );
     this->src_count = 0;
+    this->source_db.notify_source_change();
   }
-}
-
-void
-EvOmmListen::add_source( RwfMsg &map ) noexcept
-{
-  /* test sources, static sources */
-  this->x_source_db.update_source_map( this->start_ns, map );
 }
 
 void
@@ -121,14 +119,51 @@ EvOmmService::recv_directory_request( RwfMsg &msg ) noexcept
       fprintf( stderr, "no sources refreshed\n" );
       return;
     }
-    uint32_t cnt = this->source_db.update_source_map( this->start_ns, *map );
-    if ( cnt > 0 ) {
+    UpdSrcCnt cnt = this->source_db.update_source_map( this->start_ns, *map );
+    if ( cnt.new_src_cnt > 0 )
+      this->src_count += cnt.new_src_cnt;
+    if ( cnt.rem_src_cnt > 0 )
+      this->src_count -= cnt.rem_src_cnt;
+    /*if ( cnt > 0 ) {
       this->src_count += cnt;
       this->source_db.print_sources();
+    }*/
+    this->source_db.notify_source_change();
+  }
+  else if ( hdr.msg_class == UPDATE_MSG_CLASS ) {
+    if ( is_omm_debug )
+      debug_print( "directory_update", msg );
+
+    RwfMsg * map = msg.get_container_msg();
+    if ( map == NULL || map->base.type_id != RWF_MAP ) {
+      fprintf( stderr, "no sources updated\n" );
+      return;
     }
+    UpdSrcCnt cnt = this->source_db.update_source_map( this->start_ns, *map );
+    if ( cnt.new_src_cnt > 0 )
+      this->src_count += cnt.new_src_cnt;
+    if ( cnt.rem_src_cnt > 0 )
+      this->src_count -= cnt.rem_src_cnt;
+    /*if ( cnt > 0 ) {
+      this->src_count += cnt;
+      this->source_db.print_sources();
+    }*/
+    this->source_db.notify_source_change();
   }
   else if ( hdr.msg_class == CLOSE_MSG_CLASS ) {
+    if ( is_omm_debug )
+      debug_print( "directory_close", msg );
     printf( "directory closed\n" );
+  }
+}
+
+void
+OmmSourceDB::notify_source_change( void ) noexcept
+{
+  OmmSrcListener *next;
+  for ( OmmSrcListener *l = this->listener_list.hd; l != NULL; l = next ) {
+    next = l->next;
+    l->on_src_change();
   }
 }
 
@@ -238,11 +273,11 @@ OmmSourceDB::drop_sources( uint64_t origin ) noexcept
     this->index_domains();
 }
 
-uint32_t
+UpdSrcCnt
 OmmSourceDB::update_source_map( uint64_t origin,  RwfMsg &map ) noexcept
 {
   MDFieldReader rd( map );
-  uint32_t new_src_count = 0;
+  UpdSrcCnt count;
   if ( rd.first() ) {
     MDType key_ftype = map.map.key_ftype;
     do {
@@ -257,13 +292,20 @@ OmmSourceDB::update_source_map( uint64_t origin,  RwfMsg &map ) noexcept
         if ( rd.type() == MD_MESSAGE && rd.get_sub_msg( entry ) ) {
           if ( this->update_source_entry( origin, service_id,
                                           *(RwfMsg *) entry ) )
-            new_src_count++;
+            count.new_src_cnt++;
         }
+      }
+      else if ( f->u.map.action == MAP_DELETE_ENTRY ) {
+        MDReference mref( f->u.map.key, f->u.map.keylen, key_ftype, MD_BIG );
+        uint32_t    service_id = get_int<uint32_t>( mref );
+
+        if ( this->drop_source_entry( origin, service_id ) )
+          count.rem_src_cnt++;
       }
     } while ( rd.next() );
   }
   this->index_domains();
-  return new_src_count;
+  return count;
 }
 
 bool
@@ -298,6 +340,31 @@ OmmSourceDB::update_source_entry( uint64_t origin,  uint32_t service_id,
     } while ( rd.next() );
   }
   return is_new_src;
+}
+
+bool
+OmmSourceDB::drop_source_entry( uint64_t origin,  uint32_t service_id ) noexcept
+{
+  size_t   pos;
+  uint32_t i;
+  bool     is_drop_src = false;
+
+  if ( this->service_ht->find( service_id, pos, i ) ) {
+    SourceList & list = this->source_list.ptr[ i ];
+
+    for ( OmmSource * src = list.hd; src != NULL; src = src->next ) {
+      if ( src->origin == origin ) {
+        is_drop_src = true;
+        list.pop( src );
+        if ( list.is_empty() )
+          this->service_ht->remove( pos );
+        src->clear_info( DIR_SVC_LINK_ID );
+        delete src;
+        break;
+      }
+    }
+  }
+  return is_drop_src;
 }
 
 bool

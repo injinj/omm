@@ -29,11 +29,25 @@ using namespace omm;
 using namespace sassrv;
 using namespace md;
 
+struct PrintSrcs : public OmmSrcListener {
+  EvPoll      & poll;
+  OmmSourceDB & source_db;
+  PrintSrcs( EvPoll &p,  OmmSourceDB & db ) : poll( p ), source_db( db ) {}
+  virtual void on_src_change( void ) noexcept;
+};
+
+void
+PrintSrcs::on_src_change( void ) noexcept
+{
+  if ( ! this->poll.quit )
+    this->source_db.print_sources();
+}
+
 struct Args : public MainLoopVars { /* argv[] parsed args */
   OmmDict               dict;
   OmmSourceDB           source_db;
   const char          * path,
-                      * replay,
+                      * feed,
                       * file_name,
                       * prefix,
                       * msg_fmt,
@@ -43,93 +57,49 @@ struct Args : public MainLoopVars { /* argv[] parsed args */
   int                   omm_port,
                         ft_weight;
   bool                  test;
-  Args() : path( 0 ), replay( 0 ), file_name( 0 ), prefix( 0 ),
+  Args() : path( 0 ), feed( 0 ), file_name( 0 ), prefix( 0 ),
            msg_fmt( 0 ), log_file( 0 ),
            ads( NULL, "omm_server", "256", NULL, NULL, NULL ),
            rv( NULL ),
            omm_port( 0 ), ft_weight( 0 ), test( false ) {}
 };
 
+struct OmmReconnect : public EvTimerCallback, public EvConnectionNotify {
+  EvOmmClient           & client;
+  EvOmmClientParameters & param;
+  OmmSourceDB           & source_db;
+  int                     reconnect_count;
+
+  void * operator new( size_t, void *ptr ) { return ptr; }
+  OmmReconnect( EvOmmClient &cl,  EvOmmClientParameters &p,  OmmSourceDB &db )
+    : client( cl ), param( p ), source_db( db ), reconnect_count( 0 ) {}
+
+  void connect( void ) noexcept;
+  virtual void on_connect( EvSocket &conn ) noexcept;
+  virtual void on_shutdown( EvSocket &conn,  const char *err,
+                            size_t errlen ) noexcept;
+  virtual bool timer_cb( uint64_t timer_id,  uint64_t event_id ) noexcept;
+
+};
+
 struct Loop : public MainLoop<Args> {
   Loop( EvShm &m,  Args &args,  size_t num )
     : MainLoop( m, args, num ), omm_sv( 0 ), omm_client( 0 ),
-      rv_client( 0 ), rv_submgr( 0 ) {}
+      rv_client( 0 ), rv_submgr( 0 ), log( 0 ),
+      print_srcs( this->poll, args.source_db ) {}
 
-  EvOmmListen * omm_sv;
-  EvOmmClient * omm_client;
-  EvRvClient  * rv_client;
-  RvOmmSubmgr * rv_submgr;
-  Logger      * log;
+  EvOmmListen  * omm_sv;
+  EvOmmClient  * omm_client;
+  OmmReconnect * omm_conn;
+  EvRvClient   * rv_client;
+  RvOmmSubmgr  * rv_submgr;
+  Logger       * log;
+  PrintSrcs      print_srcs;
 
-  bool omm_init( void ) {
-    if ( this->r.log_file != NULL ) {
-      this->log = Logger::create();
-      if ( this->log->output_log_file( this->r.log_file ) != 0 ) {
-        perror( this->r.log_file );
-        return false;
-      }
-      this->log->start_ev( this->poll );
-    }
-    printf( "omm_version:          " kv_stringify( OMM_VER ) "\n" );
-    if ( r.path != NULL && r.dict.load_cfiles( r.path ) ) {
-      if ( r.dict.rdm_dict != NULL )
-        printf( "rdm dictionary:       %s (RDMFieldDictionary enumtype.def)\n",
-                r.path );
-      if ( r.dict.cfile_dict != NULL )
-        printf( "sass dictionary:      %s (tss_fields.cf tss_records.cf)\n",
-                r.path );
-      if ( r.dict.flist_dict != NULL )
-        printf( "flist dictionary:     %s (flistmapping)\n",
-                r.path );
-    }
-
-    if ( this->r.omm_port != 0 ) {
-      this->omm_sv = new ( aligned_malloc( sizeof( EvOmmListen ) ) )
-        EvOmmListen( this->poll, this->r.dict, this->r.source_db );
-      if ( this->omm_sv->listen( NULL, this->r.omm_port,
-                                 this->r.tcp_opts ) != 0 ) {
-        fprintf( stderr, "unable to open listen socket on %d\n",
-                 this->r.omm_port );
-        return false;
-      }
-      else if ( this->r.omm_port != 0 )
-        printf( "omm_daemon:           %d\n", this->r.omm_port );
-    }
-
-    if ( this->r.dict.rdm_dict != NULL ) {
-      printf( "\n" );
-      print_dict_info( this->r.dict.rdm_dict, "RWFFld", "RWFEnum" );
-    }
-
-    if ( this->r.test ) {
-      TestPublish *p = new ( aligned_malloc( sizeof( TestPublish ) ) )
-        TestPublish( this->poll, this->r.dict, this->r.source_db );
-      p->add_test_source( "RSF", 100 );
-      p->add_test_source( "RDF", 101 );
-      p->add_test_source( "OPR", 102 );
-      p->start();
-    }
-
-    if ( this->r.file_name != NULL ) {
-      TestReplay *p = new ( aligned_malloc( sizeof( TestReplay ) ) )
-        TestReplay( this->poll, this->r.dict, this->r.source_db );
-      p->add_replay_file( this->r.replay, 103, this->r.file_name );
-      p->start();
-    }
-
-    if ( this->r.ads.daemon != NULL )
-      this->add_publisher();
-    if ( this->r.rv.daemon != NULL || this->r.rv.network != NULL ||
-         this->r.rv.service != NULL )
-      this->add_rvclient();
-    this->r.source_db.print_sources();
-    return true;
-  }
+  bool omm_init( void ) noexcept;
 
   virtual bool initialize( void ) noexcept {
-    bool ok = this->omm_init();
-    fflush( stdout );
-    return ok;
+    return this->omm_init();
   }
   virtual bool finish( void ) noexcept {
     if ( this->rv_submgr == NULL )
@@ -145,32 +115,145 @@ struct Loop : public MainLoop<Args> {
                    const char *buf ) noexcept;
 };
 
+bool
+OmmReconnect::timer_cb( uint64_t ,  uint64_t ) noexcept
+{
+  if ( ! this->client.poll.quit )
+    this->connect();
+  return false;
+}
+
+void
+OmmReconnect::connect( void ) noexcept
+{
+  if ( ! this->client.connect( this->param, this, NULL ) ) {
+    if ( this->reconnect_count++ == 0 ) {
+      fprintf( stderr, "OmmCllient, reconnect 5 second interval to %s\n",
+               this->param.daemon );
+      this->param.opts &= ~OPT_VERBOSE;
+    }
+    this->client.poll.timer.add_timer_seconds( *this, 5, 0, 0 );
+  }
+}
+
+void
+OmmReconnect::on_connect( EvSocket &conn ) noexcept
+{
+  int len = (int) conn.get_peer_address_strlen();
+  printf( "OmmClient connected: %.*s\n", len, conn.peer_address.buf );
+}
+
+void
+OmmReconnect::on_shutdown( EvSocket &conn,  const char *err,
+                        size_t errlen ) noexcept
+{
+  int len = (int) conn.get_peer_address_strlen();
+  printf( "OmmClient shutdown: %.*s %.*s\n",
+          len, conn.peer_address.buf, (int) errlen, err );
+  if ( ! this->client.poll.quit )
+    this->connect();
+}
+
+bool
+Loop::omm_init( void ) noexcept
+{
+  bool added_sources = false;
+  if ( this->r.log_file != NULL ) {
+    this->log = Logger::create();
+    if ( this->log->output_log_file( this->r.log_file ) != 0 ) {
+      perror( this->r.log_file );
+      return false;
+    }
+    this->log->start_ev( this->poll );
+  }
+  this->r.source_db.add_source_listener( &this->print_srcs );
+  printf( "omm_version:          " kv_stringify( OMM_VER ) "\n" );
+  if ( r.path != NULL && r.dict.load_cfiles( r.path ) ) {
+    if ( r.dict.rdm_dict != NULL )
+      printf( "rdm dictionary:       %s (RDMFieldDictionary enumtype.def)\n",
+              r.path );
+    if ( r.dict.cfile_dict != NULL )
+      printf( "sass dictionary:      %s (tss_fields.cf tss_records.cf)\n",
+              r.path );
+    if ( r.dict.flist_dict != NULL )
+      printf( "flist dictionary:     %s (flistmapping)\n",
+              r.path );
+  }
+
+  if ( this->r.omm_port != 0 ) {
+    this->omm_sv = new ( aligned_malloc( sizeof( EvOmmListen ) ) )
+      EvOmmListen( this->poll, this->r.dict, this->r.source_db );
+    if ( this->omm_sv->listen( NULL, this->r.omm_port,
+                               this->r.tcp_opts ) != 0 ) {
+      fprintf( stderr, "Unable to open listen socket on %d\n",
+               this->r.omm_port );
+      return false;
+    }
+    else if ( this->r.omm_port != 0 )
+      printf( "omm_daemon:           %d\n", this->r.omm_port );
+  }
+
+  if ( this->r.dict.rdm_dict != NULL ) {
+    printf( "\n" );
+    print_dict_info( this->r.dict.rdm_dict, "RWFFld", "RWFEnum" );
+  }
+
+  if ( this->r.test ) {
+    TestPublish *p = new ( aligned_malloc( sizeof( TestPublish ) ) )
+      TestPublish( this->poll, this->r.dict, this->r.source_db );
+    p->add_test_source( this->r.feed, 100 );
+    p->start();
+    added_sources = true;
+  }
+
+  if ( this->r.file_name != NULL && ! this->r.test ) {
+    TestReplay *p = new ( aligned_malloc( sizeof( TestReplay ) ) )
+      TestReplay( this->poll, this->r.dict, this->r.source_db );
+    p->add_replay_file( this->r.feed, 100, this->r.file_name );
+    p->start();
+    added_sources = true;
+  }
+
+  if ( this->r.ads.daemon != NULL )
+    this->add_publisher();
+  if ( this->r.rv.daemon != NULL || this->r.rv.network != NULL ||
+       this->r.rv.service != NULL )
+    this->add_rvclient();
+
+  if ( added_sources )
+    this->r.source_db.notify_source_change();
+  return true;
+}
+
 void
 Loop::add_publisher( void ) noexcept
 {
-  if ( this->omm_client == NULL ) {
-    this->omm_client = new ( aligned_malloc( sizeof( EvOmmClient ) ) )
-           EvOmmClient( this->poll, this->r.dict, this->r.source_db );
-    this->omm_client->have_dictionary =
-      ( this->omm_client->dict.rdm_dict != NULL );
-  }
-  if ( ! this->omm_client->connect( this->r.ads, NULL, NULL ) )
-    fprintf( stderr, "unable to connect to %s\n", this->r.ads.daemon );
+  this->omm_client = new ( aligned_malloc( sizeof( EvOmmClient ) ) )
+         EvOmmClient( this->poll, this->r.dict, this->r.source_db );
+  this->omm_client->have_dictionary =
+    ( this->omm_client->dict.rdm_dict != NULL );
+  this->omm_conn =
+    new ( ::malloc( sizeof( OmmReconnect ) ) )
+      OmmReconnect( *this->omm_client, this->r.ads, this->r.source_db );
+  this->omm_conn->connect();
 }
 
 void
 Loop::add_rvclient( void ) noexcept
 {
-  if ( this->rv_client == NULL ) {
-    this->rv_client = new ( aligned_malloc( sizeof( EvRvClient ) ) )
-      EvRvClient( this->poll );
-    this->rv_submgr = new ( aligned_malloc( sizeof( RvOmmSubmgr ) ) )
-      RvOmmSubmgr( this->poll, *this->rv_client, this->r.dict,
-                   this->r.ft_weight, this->r.prefix, this->r.msg_fmt );
+  this->rv_client = new ( aligned_malloc( sizeof( EvRvClient ) ) )
+    EvRvClient( this->poll );
+  this->rv_submgr = new ( aligned_malloc( sizeof( RvOmmSubmgr ) ) )
+    RvOmmSubmgr( this->poll, *this->rv_client, this->r.dict,
+                 this->r.source_db, this->r.ft_weight, this->r.prefix,
+                 this->r.msg_fmt );
+  if ( this->r.feed != NULL && this->r.feed[ 0 ] != '\0' ) {
+    this->rv_submgr->feed = &this->r.feed;
+    this->rv_submgr->feed_count = 1;
   }
   if ( ! this->rv_client->connect( this->r.rv, this->rv_submgr,
                                    this->rv_submgr ) )
-    fprintf( stderr, "unable to connect to rv\n" );
+    fprintf( stderr, "Unable to connect to rv\n" );
 }
 
 int
@@ -191,7 +274,7 @@ main( int argc, const char *argv[] )
   r.add_desc( "  -s svc    = rv service" );
   r.add_desc( "  -u user   = rv user                (omm_server)" );
   r.add_desc( "  -a pref   = rv subject prefix      (_TIC.)" );
-  r.add_desc( "  -m fmt    = rv message format      (SASS_QFORM)" );
+  r.add_desc( "  -m fmt    = rv message format      (TIB_QFORM)" );
   r.add_desc( "  -l file   = log file" );
   r.add_desc( "  -g        = turn on debug" );
   r.add_desc( "  -t        = add test sources" );
@@ -199,7 +282,7 @@ main( int argc, const char *argv[] )
   r.add_desc( "  -p host   = connect to publisher, interactive or bcast" );
   r.add_desc( "  -i app_id = identify app           (256)" );
   r.add_desc( "  -f file   = replay file name" );
-  r.add_desc( "  -r feed   = replay feed name       (XXX)" );
+  r.add_desc( "  -r feed   = feed prefix            (RSF)" );
   if ( ! r.parse_args( argc, argv ) )
     return 1;
   if ( shm.open( r.map_name, r.db_num ) != 0 )
@@ -211,7 +294,7 @@ main( int argc, const char *argv[] )
   r.rv.service = r.get_arg( argc, argv, 1, "-s", NULL );
   r.rv.userid  = r.get_arg( argc, argv, 1, "-u", "omm_server" );
   r.prefix     = r.get_arg( argc, argv, 1, "-a", "_TIC." );
-  r.msg_fmt    = r.get_arg( argc, argv, 1, "-m", "SASS_QFORM" );
+  r.msg_fmt    = r.get_arg( argc, argv, 1, "-m", "TIB_QFORM" );
   r.log_file   = r.get_arg( argc, argv, 1, "-l", NULL );
   r.ft_weight  = r.int_arg( argc, argv, 1, "-w", "20", NULL );
   r.ads.daemon = r.get_arg( argc, argv, 1, "-p", NULL );
@@ -219,7 +302,7 @@ main( int argc, const char *argv[] )
   r.ads.user   = r.rv.userid;
   r.path       = r.get_arg( argc, argv, 1, "-c", ".", "cfile_path" );
   r.test       = r.bool_arg( argc, argv, 0, "-t", NULL, NULL );
-  r.replay     = r.get_arg( argc, argv, 1, "-r", "XXX" );
+  r.feed       = r.get_arg( argc, argv, 1, "-r", "RSF" );
   r.file_name  = r.get_arg( argc, argv, 1, "-f", NULL );
   if ( r.bool_arg( argc, argv, 0, "-g", NULL, NULL ) )
     omm_debug = 1;
