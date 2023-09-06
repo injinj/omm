@@ -64,34 +64,68 @@ struct Args : public MainLoopVars { /* argv[] parsed args */
            omm_port( 0 ), ft_weight( 0 ), test( false ) {}
 };
 
-struct OmmReconnect : public EvTimerCallback, public EvConnectionNotify {
-  EvOmmClient           & client;
-  EvOmmClientParameters & param;
-  OmmSourceDB           & source_db;
-  int                     reconnect_count;
+template<class Sock, class Param, class ClientCB>
+struct EvReconnect : public EvTimerCallback, public EvConnectionNotify {
+  Sock               & client;
+  Param              & param;
+  EvConnectionNotify * notify;
+  ClientCB           * cb;
+  int                  reconnect_count;
 
   void * operator new( size_t, void *ptr ) { return ptr; }
-  OmmReconnect( EvOmmClient &cl,  EvOmmClientParameters &p,  OmmSourceDB &db )
-    : client( cl ), param( p ), source_db( db ), reconnect_count( 0 ) {}
+  EvReconnect( Sock &cl,  Param &p,  EvConnectionNotify *n,  ClientCB *c )
+    : client( cl ), param( p ), notify( n ), cb( c ), reconnect_count( 0 ) {}
 
-  void connect( void ) noexcept;
-  virtual void on_connect( EvSocket &conn ) noexcept;
+  void connect( void ) {
+    if ( ! this->client.connect( this->param, this, this->cb ) ) {
+      if ( this->reconnect_count++ == 0 ) {
+        fprintf( stderr, "Reconnect 5 second interval\n" );
+        this->param.opts &= ~OPT_VERBOSE;
+      }
+      this->client.poll.timer.add_timer_seconds( *this, 5, 0, 0 );
+    }
+  }
+  virtual void on_connect( EvSocket &conn ) noexcept {
+    int len = (int) conn.get_peer_address_strlen();
+    if ( this->notify != NULL )
+      this->notify->on_connect( conn );
+    else
+      printf( "Client connected: %.*s\n", len, conn.peer_address.buf );
+  }
   virtual void on_shutdown( EvSocket &conn,  const char *err,
-                            size_t errlen ) noexcept;
-  virtual bool timer_cb( uint64_t timer_id,  uint64_t event_id ) noexcept;
-
+                            size_t errlen ) noexcept {
+    if ( this->notify != NULL )
+      this->notify->on_shutdown( conn, err, errlen );
+    else {
+      int len = (int) conn.get_peer_address_strlen();
+      printf( "Client shutdown: %.*s %.*s\n",
+              len, conn.peer_address.buf, (int) errlen, err );
+    }
+    if ( ! this->client.poll.quit )
+      this->connect();
+  }
+  virtual bool timer_cb( uint64_t ,  uint64_t ) noexcept {
+    if ( ! this->client.poll.quit )
+      this->connect();
+    return false;
+  }
 };
+typedef EvReconnect<EvOmmClient, EvOmmClientParameters,
+                    OmmClientCB> OmmReconnect;
+typedef EvReconnect<EvRvClient, EvRvClientParameters,
+                    RvClientCB> RvReconnect;
 
 struct Loop : public MainLoop<Args> {
   Loop( EvShm &m,  Args &args,  size_t num )
     : MainLoop( m, args, num ), omm_sv( 0 ), omm_client( 0 ),
-      rv_client( 0 ), rv_submgr( 0 ), log( 0 ),
+      omm_conn( 0 ), rv_client( 0 ), rv_conn( 0 ), rv_submgr( 0 ), log( 0 ),
       print_srcs( this->poll, args.source_db ) {}
 
   EvOmmListen  * omm_sv;
   EvOmmClient  * omm_client;
   OmmReconnect * omm_conn;
   EvRvClient   * rv_client;
+  RvReconnect  * rv_conn;
   RvOmmSubmgr  * rv_submgr;
   Logger       * log;
   PrintSrcs      print_srcs;
@@ -114,45 +148,6 @@ struct Loop : public MainLoop<Args> {
   void log_output( int stream,  uint64_t stamp,  size_t len,
                    const char *buf ) noexcept;
 };
-
-bool
-OmmReconnect::timer_cb( uint64_t ,  uint64_t ) noexcept
-{
-  if ( ! this->client.poll.quit )
-    this->connect();
-  return false;
-}
-
-void
-OmmReconnect::connect( void ) noexcept
-{
-  if ( ! this->client.connect( this->param, this, NULL ) ) {
-    if ( this->reconnect_count++ == 0 ) {
-      fprintf( stderr, "OmmCllient, reconnect 5 second interval to %s\n",
-               this->param.daemon );
-      this->param.opts &= ~OPT_VERBOSE;
-    }
-    this->client.poll.timer.add_timer_seconds( *this, 5, 0, 0 );
-  }
-}
-
-void
-OmmReconnect::on_connect( EvSocket &conn ) noexcept
-{
-  int len = (int) conn.get_peer_address_strlen();
-  printf( "OmmClient connected: %.*s\n", len, conn.peer_address.buf );
-}
-
-void
-OmmReconnect::on_shutdown( EvSocket &conn,  const char *err,
-                        size_t errlen ) noexcept
-{
-  int len = (int) conn.get_peer_address_strlen();
-  printf( "OmmClient shutdown: %.*s %.*s\n",
-          len, conn.peer_address.buf, (int) errlen, err );
-  if ( ! this->client.poll.quit )
-    this->connect();
-}
 
 bool
 Loop::omm_init( void ) noexcept
@@ -234,7 +229,7 @@ Loop::add_publisher( void ) noexcept
     ( this->omm_client->dict.rdm_dict != NULL );
   this->omm_conn =
     new ( ::malloc( sizeof( OmmReconnect ) ) )
-      OmmReconnect( *this->omm_client, this->r.ads, this->r.source_db );
+      OmmReconnect( *this->omm_client, this->r.ads, NULL, NULL );
   this->omm_conn->connect();
 }
 
@@ -251,9 +246,14 @@ Loop::add_rvclient( void ) noexcept
     this->rv_submgr->feed = &this->r.feed;
     this->rv_submgr->feed_count = 1;
   }
-  if ( ! this->rv_client->connect( this->r.rv, this->rv_submgr,
+  this->rv_conn =
+    new ( ::malloc( sizeof( RvReconnect ) ) )
+      RvReconnect( *this->rv_client, this->r.rv, this->rv_submgr,
+                   this->rv_submgr );
+  this->rv_conn->connect();
+/*  if ( ! this->rv_client->connect( this->r.rv, this->rv_submgr,
                                    this->rv_submgr ) )
-    fprintf( stderr, "Unable to connect to rv\n" );
+    fprintf( stderr, "Unable to connect to rv\n" );*/
 }
 
 int

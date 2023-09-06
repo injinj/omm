@@ -155,20 +155,6 @@ lnk_lib     += $(push_static) -ldecnumber $(pop_static)
 dlnk_lib    += -ldecnumber
 endif
 
-ifneq (,$(kv_home))
-kv_lib      := $(kv_home)/$(libd)/libraikv.a
-kv_dll      := $(kv_home)/$(libd)/libraikv.$(dll)
-lnk_lib     += $(kv_lib)
-lnk_dep     += $(kv_lib)
-dlnk_lib    += -L$(kv_home)/$(libd) -lraikv
-dlnk_dep    += $(kv_dll)
-rpath3       = ,-rpath,$(pwd)/$(kv_home)/$(libd)
-includes    += -I$(kv_home)/include
-else
-lnk_lib     += $(push_static) -lraikv $(pop_static)
-dlnk_lib    += -lraikv
-endif
-
 ifneq (,$(sassrv_home))
 sassrv_lib  := $(sassrv_home)/$(libd)/libsassrv.a
 sassrv_dll  := $(sassrv_home)/$(libd)/libsassrv.$(dll)
@@ -181,6 +167,20 @@ sassrv_includes = -I$(sassrv_home)/include
 else
 lnk_lib     += -lsassrv
 dlnk_lib    += -lsassrv
+endif
+
+ifneq (,$(kv_home))
+kv_lib      := $(kv_home)/$(libd)/libraikv.a
+kv_dll      := $(kv_home)/$(libd)/libraikv.$(dll)
+lnk_lib     += $(kv_lib)
+lnk_dep     += $(kv_lib)
+dlnk_lib    += -L$(kv_home)/$(libd) -lraikv
+dlnk_dep    += $(kv_dll)
+rpath3       = ,-rpath,$(pwd)/$(kv_home)/$(libd)
+includes    += -I$(kv_home)/include
+else
+lnk_lib     += $(push_static) -lraikv $(pop_static)
+dlnk_lib    += -lraikv
 endif
 
 rpath   := -Wl,-rpath,$(pwd)/$(libd)$(rpath1)$(rpath2)$(rpath3)$(rpath4)

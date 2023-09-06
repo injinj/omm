@@ -158,7 +158,7 @@ RvOmmSubmgr::on_src_change( void ) noexcept
       }
     }
     if ( mapped != 0 ) {
-      if ( ! this->is_running )
+      if ( ! this->is_running && ! this->is_finished )
         this->ft.activate();
     }
     else {
@@ -168,6 +168,18 @@ RvOmmSubmgr::on_src_change( void ) noexcept
   }
 }
 
+void
+RvOmmSubmgr::release( void ) noexcept
+{
+  this->sub_db.release();
+  this->ft.release();
+  this->active_ht->clear_all();
+  this->reply_tab.release();
+  if ( this->coll_ht != NULL ) {
+    delete this->coll_ht;
+    this->coll_ht = NULL;
+  }
+}
 
 void
 RvOmmSubmgr::on_ft_change( uint8_t action ) noexcept
@@ -179,6 +191,7 @@ RvOmmSubmgr::on_ft_change( uint8_t action ) noexcept
   if ( action == RvFt::ACTION_FINISH ) {
     this->is_finished = true;
     this->is_running  = false;
+    this->release();
   }
   else if ( action == RvFt::ACTION_ACTIVATE ||
             action == RvFt::ACTION_DEACTIVATE ) {
@@ -239,11 +252,19 @@ RvOmmSubmgr::on_connect( EvSocket &conn ) noexcept
 void
 RvOmmSubmgr::on_start( void ) noexcept
 {
-  int sfd = this->poll.get_null_fd();
-  this->PeerData::init_peer( this->poll.get_next_id(), sfd, -1, NULL,
-                             "omm_submgr" );
-  this->PeerData::set_name( "omm_submgr", 10 );
-  this->poll.add_sock( this );
+  bool is_restart;
+  if ( ! this->in_list( IN_ACTIVE_LIST ) ) {
+    int sfd = this->poll.get_null_fd();
+    this->PeerData::init_peer( this->poll.get_next_id(), sfd, -1, NULL,
+                               "omm_submgr" );
+    this->PeerData::set_name( "omm_submgr", 10 );
+    this->poll.add_sock( this );
+    is_restart = false;
+  }
+  else {
+    is_restart = true;
+    this->ft_param.join_ms = 0;
+  }
   if ( this->client.userid_len > 0 ) {
     this->ft_param.user = this->client.userid;
     this->ft_param.user_len = ::strlen( this->client.userid );
@@ -263,10 +284,16 @@ RvOmmSubmgr::on_start( void ) noexcept
   }
   printf( "Start FT subject=\"%.*s\"\n", (int) this->ft_param.ft_sub_len,
           this->ft_param.ft_sub );
+  this->is_finished = false;
+  this->is_stopped = false;
+  this->is_running = false;
+  this->ft_rank = 0;
   this->ft.start( this->ft_param );
   this->sub_db.start_subscriptions( false );
   this->poll.update_time_ns();
   this->tid = this->poll.now_ns;
+  if ( is_restart )
+    this->on_src_change();
   this->poll.timer.add_timer_seconds( this->fd, PROCESS_EVENTS_SECS,
                                       this->tid, PROCESS_EVENTS );
 }
@@ -274,7 +301,11 @@ RvOmmSubmgr::on_start( void ) noexcept
 void
 RvOmmSubmgr::on_stop( void ) noexcept
 {
+  if ( this->ft_rank == 1 )
+    this->deactivate_subs();
   this->is_stopped = true;
+  this->tid = 0;
+  this->ft_rank = 0;
   this->sub_db.stop_subscriptions();
   if ( this->ft.stop() == 0 )
     this->is_finished = true;
@@ -609,7 +640,6 @@ RvOmmSubmgr::timer_expire( uint64_t id,  uint64_t ev ) noexcept
 void RvOmmSubmgr::write( void ) noexcept {}
 void RvOmmSubmgr::read( void ) noexcept {}
 void RvOmmSubmgr::process( void ) noexcept {}
-void RvOmmSubmgr::release( void ) noexcept {}
 void RvOmmSubmgr::on_write_ready( void ) noexcept {}
 
 void
@@ -796,7 +826,7 @@ RvOmmSubmgr::feed_down_subs( void ) noexcept
       pub.msg     = w.buf;
       pub.msg_len = w.update_hdr();
     }
-    if ( type_id == TIBMSG_TYPE_ID ) {
+    else if ( type_id == TIBMSG_TYPE_ID ) {
       TibMsgWriter w( this->cvt_mem, buf_ptr, sz );
       append_status<TibMsgWriter>( w, TRANSIENT_TYPE, FEED_DOWN_STATUS );
       pub.msg     = w.buf;
@@ -950,8 +980,13 @@ RvOmmSubmgr::on_shutdown( EvSocket &conn,  const char *err,
   int len = (int) conn.get_peer_address_strlen();
   printf( "RvClient shutdown: %.*s %.*s\n",
           len, conn.peer_address.buf, (int) errlen, err );
+  this->ft.finish_ms = 0;
+  if ( ! this->is_stopped )
+    this->on_stop();
+#if 0
   /* if disconnected by tcp, usually a reconnect protocol, but this just exits*/
   if ( this->poll.quit == 0 )
     this->poll.quit = 1; /* causes poll loop to exit */
+#endif
 }
 
