@@ -158,7 +158,8 @@ static const char dsply_name[] = "DSPLY_NAME",
                   bid[]        = "BID",
                   ask[]        = "ASK",
                   timact[]     = "TIMACT",
-                  trade_date[] = "TRADE_DATE";
+                  trade_date[] = "TRADE_DATE",
+                  ticker[]     = "TICKER";
 void
 TestPublish::on_sub( NotifySub &sub ) noexcept
 {
@@ -225,20 +226,22 @@ TestPublish::initial( const char *reply,  size_t reply_len,  OmmSource *src,
   else
     msg.set( X_CLEAR_CACHE, X_REFRESH_COMPLETE );
   msg.add_seq_num( rt->seqno )
+     .add_state( DATA_STATE_OK, STREAM_STATE_OPEN )
      .add_msg_key()
-     .service_id( src->service_id )
-     .name( ric, ric_len )
-     .name_type( NAME_TYPE_RIC )
+       .service_id( src->service_id )
+       .name( ric, ric_len )
+       .name_type( NAME_TYPE_RIC )
      .end_msg_key();
   msg.add_field_list()
-     .add_flist( 90 )
-     .append_string ( dsply_name , ric )
+     .add_flist( 136 )
+     .append_string ( dsply_name , sizeof( dsply_name ), ric, ric_len )
      .append_decimal( ask        , rt->ask )
      .append_decimal( bid        , rt->bid )
      .append_decimal( ask_size   , rt->ask_size )
      .append_decimal( bid_size   , rt->bid_size )
      .append_time   ( timact     , rt->time )
      .append_date   ( trade_date , rt->date )
+     .append_string ( ticker     , sizeof( ticker ), ric, ric_len )
      .end_msg();
   if ( reply_len == 0 ) {
     reply     = rt->value;
@@ -261,19 +264,22 @@ TestPublish::update( OmmSource *src,  const char *ric,  size_t ric_len,
                     UPDATE_MSG_CLASS, (RdmDomainType) domain, rt->hash );
   msg.add_seq_num( rt->seqno )
      .add_msg_key()
-     .service_id( src->service_id )
-     .name( ric, ric_len )
-     .name_type( NAME_TYPE_RIC )
+       .service_id( src->service_id )
+       .name( ric, ric_len )
+       .name_type( NAME_TYPE_RIC )
      .end_msg_key();
   msg.add_update( UPD_TYPE_QUOTE )
      .add_field_list()
+#if 0
      .add_flist( 90 )
+#endif
      .append_decimal( ask        , rt->ask )
      .append_decimal( bid        , rt->bid )
      .append_decimal( ask_size   , rt->ask_size )
      .append_decimal( bid_size   , rt->bid_size )
      .append_time   ( timact     , rt->time )
      .append_date   ( trade_date , rt->date )
+     .append_string ( ticker     , sizeof( ticker ), ric, ric_len )
      .end_msg();
   printf( "pub update %.*s\n", (int) rt->len, rt->value );
   EvPublish pub( rt->value, rt->len, NULL, 0, msg.buf, msg.off,
