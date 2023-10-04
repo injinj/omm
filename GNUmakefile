@@ -59,7 +59,7 @@ cc          := $(CC) -std=c11
 cpp         := $(CXX)
 arch_cflags := -mavx -maes -fno-omit-frame-pointer
 gcc_wflags  := -Wall -Wextra
-#-Werror
+# -Werror
 # if windows cross compile
 ifeq (true,$(mingw))
 dll         := dll
