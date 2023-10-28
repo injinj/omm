@@ -110,7 +110,8 @@ bool
 TestReplay::timer_expire( uint64_t, uint64_t ) noexcept
 {
   MDMsgMem mem;
-  char     subj[ 1024 ],
+  char     subj_buf[ 1024 ],
+         * subj,
            size[ 128 ];
   size_t   sz         = 0;
   uint32_t seqno      = 0;
@@ -119,9 +120,9 @@ TestReplay::timer_expire( uint64_t, uint64_t ) noexcept
            msg_type   = UPDATE_TYPE;
 
   for (;;) {
-    if ( fgets( subj, sizeof( subj ), this->fp ) == NULL )
+    if ( fgets( subj_buf, sizeof( subj_buf ), this->fp ) == NULL )
       break;
-    if ( subj[ 0 ] <= ' ' || subj[ 0 ] == '#' )
+    if ( subj_buf[ 0 ] <= ' ' || subj_buf[ 0 ] == '#' )
       continue;
     if ( fgets( size, sizeof( size ), this->fp ) == NULL )
       break;
@@ -141,9 +142,20 @@ TestReplay::timer_expire( uint64_t, uint64_t ) noexcept
     this->buflen = sz;
   }
 
-  size_t slen = ::strlen( subj );
-  while ( slen > 0 && subj[ slen - 1 ] < ' ' )
-    subj[ --slen ] = '\0';
+  size_t slen = ::strlen( subj_buf );
+  while ( slen > 0 && subj_buf[ slen - 1 ] < ' ' )
+    subj_buf[ --slen ] = '\0';
+  size_t off, dot[ 8 ], dotcnt = 0;
+  for ( off = 0; off < slen; off++ )
+    if ( subj_buf[ off ] == '.' && dotcnt < 8 )
+      dot[ dotcnt++ ] = off;
+  if ( dotcnt > 2 ) {
+    subj = &subj_buf[ dot[ dotcnt - 2 ] + 1 ];
+    slen -= dot[ dotcnt - 2 ] + 1;
+  }
+  else {
+    subj = subj_buf;
+  }
   for ( size_t n = 0; n < sz; ) {
     size_t i = fread( &buf[ n ], 1, sz - n, this->fp ); /* message data */
     if ( i == 0 ) {
