@@ -682,7 +682,7 @@ RvOmmSubmgr::start_sub( RvSubscription &sub,  bool is_bcast_reply,
 {
   Insub m( sub, this->pref_len );
 
-  if ( ! RvSubscriptionDB::is_rv_wildcard( m.sub, m.sublen ) ) {
+  if ( ! is_rv_wildcard( m.sub, m.sublen ) ) {
     uint32_t  h      = m.hash(),
               refcnt = sub.refcnt;
     NotifySub nsub( m.sub, m.sublen, NULL, 0, h, 0, 'V', *this );
@@ -811,7 +811,7 @@ RvOmmSubmgr::feed_down_subs( void ) noexcept
         sub = this->sub_db.sub_tab.next( loc ) ) {
     if ( sub->refcnt == 0 )
       continue;
-    if ( RvSubscriptionDB::is_rv_wildcard( sub->value, sub->len ) )
+    if ( is_rv_wildcard( sub->value, sub->len ) )
       continue;
 
     this->cvt_mem.reuse();
@@ -848,7 +848,7 @@ RvOmmSubmgr::stop_sub( sassrv::RvSubscription &sub,
 {
   Insub m( sub, this->pref_len );
 
-  if ( ! RvSubscriptionDB::is_rv_wildcard( m.sub, m.sublen ) ) {
+  if ( ! is_rv_wildcard( m.sub, m.sublen ) ) {
     uint32_t  h      = m.hash(),
               refcnt = sub.refcnt;
     NotifySub nsub( m.sub, m.sublen, NULL, 0, h, 0, 'V', *this );

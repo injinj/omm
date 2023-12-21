@@ -28,7 +28,7 @@ Requires(post): /sbin/ldconfig
 Requires(postun): /sbin/ldconfig
 
 %description
-Rai Sass RV protocol
+Rai Open Message Model
 
 %prep
 %setup -q

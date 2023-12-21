@@ -127,6 +127,20 @@ dlnk_dep    :=
 omm_dlnk_lib := -L$(pwd)/$(libd) -lomm
 omm_dlnk_dep := $(libd)/libomm.$(dll)
 
+ifneq (,$(sassrv_home))
+sassrv_lib  := $(sassrv_home)/$(libd)/libsassrv.a
+sassrv_dll  := $(sassrv_home)/$(libd)/libsassrv.$(dll)
+lnk_lib     += $(sassrv_lib)
+lnk_dep     += $(sassrv_lib)
+dlnk_lib    += -L$(sassrv_home)/$(libd) -lsassrv
+dlnk_dep    += $(sassrv_dll)
+rpath4       = ,-rpath,$(pwd)/$(sassrv_home)/$(libd)
+sassrv_includes = -I$(sassrv_home)/include
+else
+lnk_lib     += -lsassrv
+dlnk_lib    += -lsassrv
+endif
+
 ifneq (,$(md_home))
 md_lib      := $(md_home)/$(libd)/libraimd.a
 md_dll      := $(md_home)/$(libd)/libraimd.$(dll)
@@ -153,20 +167,6 @@ dec_includes = -I$(dec_home)/include
 else
 lnk_lib     += $(push_static) -ldecnumber $(pop_static)
 dlnk_lib    += -ldecnumber
-endif
-
-ifneq (,$(sassrv_home))
-sassrv_lib  := $(sassrv_home)/$(libd)/libsassrv.a
-sassrv_dll  := $(sassrv_home)/$(libd)/libsassrv.$(dll)
-lnk_lib     += $(sassrv_lib)
-lnk_dep     += $(sassrv_lib)
-dlnk_lib    += -L$(sassrv_home)/$(libd) -lsassrv
-dlnk_dep    += $(sassrv_dll)
-rpath4       = ,-rpath,$(pwd)/$(sassrv_home)/$(libd)
-sassrv_includes = -I$(sassrv_home)/include
-else
-lnk_lib     += -lsassrv
-dlnk_lib    += -lsassrv
 endif
 
 ifneq (,$(kv_home))
