@@ -67,7 +67,7 @@ exe         := .exe
 soflag      := -shared -Wl,--subsystem,windows
 fpicflags   := -fPIC -DRV_SHARED
 sock_lib    := -lcares -lws2_32
-dynlink_lib := -lpcre2-8
+dynlink_lib := -lpcre2-8 -lz
 NO_STL      := 1
 else
 dll         := so
@@ -76,7 +76,7 @@ soflag      := -shared
 fpicflags   := -fPIC
 thread_lib  := -pthread -lrt
 sock_lib    := -lcares
-dynlink_lib := -lpcre2-8
+dynlink_lib := -lpcre2-8 -lz
 endif
 # make apple shared lib
 ifeq (Darwin,$(lsb_dist)) 

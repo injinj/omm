@@ -18,12 +18,14 @@ BuildRequires:  libdecnumber
 BuildRequires:  pcre2-devel
 BuildRequires:  git-core
 BuildRequires:  c-ares-devel
+BuildRequires:  zlib-devel
 Requires:       raikv
 Requires:       raimd
 Requires:       sassrv
 Requires:       libdecnumber
 Requires:       pcre2
 Requires:       c-ares
+Requires:       zlib
 Requires(post): /sbin/ldconfig
 Requires(postun): /sbin/ldconfig
 
