@@ -29,8 +29,8 @@ bool OmmClientCB::on_omm_msg( const char *,  size_t ,  uint32_t ,
                               md::RwfMsg & ) noexcept { return true; }
 
 bool
-EvOmmClient::connect( EvOmmClientParameters &p,  EvConnectionNotify *n,
-                      OmmClientCB *c ) noexcept
+EvOmmClient::omm_connect( EvOmmClientParameters &p,  EvConnectionNotify *n,
+                          OmmClientCB *c ) noexcept
 {
   char * daemon = NULL, buf[ 256 ];
   int port = p.port;

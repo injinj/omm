@@ -68,8 +68,8 @@ struct EvOmmClient : public EvOmmConn, public kv::RouteNotify {
 
   void * operator new( size_t, void *ptr ) { return ptr; }
   EvOmmClient( kv::EvPoll &p,  OmmDict &d,  OmmSourceDB &db ) noexcept;
-  bool connect( EvOmmClientParameters &p,  kv::EvConnectionNotify *n = NULL,
-                OmmClientCB *c = NULL ) noexcept;
+  bool omm_connect( EvOmmClientParameters &p,  kv::EvConnectionNotify *n = NULL,
+                    OmmClientCB *c = NULL ) noexcept;
   virtual bool timer_expire( uint64_t timer_id, uint64_t event_id ) noexcept;
   virtual void process( void ) noexcept;
   virtual void release( void ) noexcept;

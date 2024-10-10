@@ -452,7 +452,7 @@ main( int argc, const char *argv[] )
   }
   md_init_auto_unpack();
   
-  if ( ! conn.connect( param, &data, &data ) ) {
+  if ( ! conn.omm_connect( param, &data, &data ) ) {
     fprintf( stderr, "unable to connect to %s\n", host );
     return 1;
   }

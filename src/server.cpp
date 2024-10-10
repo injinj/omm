@@ -76,8 +76,10 @@ struct EvReconnect : public EvTimerCallback, public EvConnectionNotify {
   EvReconnect( Sock &cl,  Param &p,  EvConnectionNotify *n,  ClientCB *c )
     : client( cl ), param( p ), notify( n ), cb( c ), reconnect_count( 0 ) {}
 
-  void connect( void ) {
-    if ( ! this->client.connect( this->param, this, this->cb ) ) {
+  bool reconnect( void ) noexcept;
+
+  void do_connect( void ) {
+    if ( ! this->reconnect() ) {
       if ( this->reconnect_count++ == 0 ) {
         fprintf( stderr, "Reconnect 5 second interval\n" );
         this->param.opts &= ~OPT_VERBOSE;
@@ -102,11 +104,11 @@ struct EvReconnect : public EvTimerCallback, public EvConnectionNotify {
               len, conn.peer_address.buf, (int) errlen, err );
     }
     if ( ! this->client.poll.quit )
-      this->connect();
+      this->do_connect();
   }
   virtual bool timer_cb( uint64_t ,  uint64_t ) noexcept {
     if ( ! this->client.poll.quit )
-      this->connect();
+      this->do_connect();
     return false;
   }
 };
@@ -114,6 +116,20 @@ typedef EvReconnect<EvOmmClient, EvOmmClientParameters,
                     OmmClientCB> OmmReconnect;
 typedef EvReconnect<EvRvClient, EvRvClientParameters,
                     RvClientCB> RvReconnect;
+
+template <>
+bool
+OmmReconnect::reconnect( void ) noexcept
+{
+  return this->client.omm_connect( this->param, this, this->cb );
+}
+
+template <>
+bool
+RvReconnect::reconnect( void ) noexcept
+{
+  return this->client.rv_connect( this->param, this, this->cb );
+}
 
 struct Loop : public MainLoop<Args> {
   Loop( EvShm &m,  Args &args,  size_t num )
@@ -230,7 +246,7 @@ Loop::add_publisher( void ) noexcept
   this->omm_conn =
     new ( ::malloc( sizeof( OmmReconnect ) ) )
       OmmReconnect( *this->omm_client, this->r.ads, NULL, NULL );
-  this->omm_conn->connect();
+  this->omm_conn->do_connect();
 }
 
 void
@@ -250,7 +266,7 @@ Loop::add_rvclient( void ) noexcept
     new ( ::malloc( sizeof( RvReconnect ) ) )
       RvReconnect( *this->rv_client, this->r.rv, this->rv_submgr,
                    this->rv_submgr );
-  this->rv_conn->connect();
+  this->rv_conn->do_connect();
 /*  if ( ! this->rv_client->connect( this->r.rv, this->rv_submgr,
                                    this->rv_submgr ) )
     fprintf( stderr, "Unable to connect to rv\n" );*/
