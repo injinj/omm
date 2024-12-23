@@ -70,11 +70,15 @@ RvOmmSubmgr::RvOmmSubmgr( kv::EvPoll &p,  sassrv::EvRvClient &c,
   else if ( msg_fmt != NULL ) {
     uint32_t i;
     MDMatch * m;
+    bool found = false;
     for ( m = MDMsg::first_match( i ); m; m = MDMsg::next_match( i ) ) {
       if ( ::strcasecmp( m->name, msg_fmt ) == 0 ) {
         this->fmt = m->hint[ 0 ];
+        found = true;
         break;
       }
+      if ( ! found )
+        goto not_found;
     }
     switch ( this->fmt ) {
       case RVMSG_TYPE_ID:
@@ -83,6 +87,7 @@ RvOmmSubmgr::RvOmmSubmgr( kv::EvPoll &p,  sassrv::EvRvClient &c,
       case TIB_SASS_TYPE_ID:
         break;
       default:
+      not_found:;
         fprintf( stderr, "format \"%s\" %s, types:\n", msg_fmt,
                  m == NULL ? "not found" : "converter not implemented" );
         for ( m = MDMsg::first_match( i ); m; m = MDMsg::next_match( i ) ) {
