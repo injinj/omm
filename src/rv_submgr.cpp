@@ -341,26 +341,26 @@ void append_hdr( Writer &w,  MDFormClass *form,  uint16_t msg_type,
                  uint16_t rec_type,  bool has_seq,  uint16_t seqno,
                  uint16_t status,  const char *subj,  size_t sublen ) noexcept
 {
-  if ( msg_type != INITIAL_TYPE || form == NULL ) {
-    w.append_uint( SASS_MSG_TYPE  , SASS_MSG_TYPE_LEN  , msg_type );
+  if ( msg_type != MD_INITIAL_TYPE || form == NULL ) {
+    w.append_uint( MD_SASS_MSG_TYPE  , MD_SASS_MSG_TYPE_LEN  , msg_type );
     if ( rec_type != 0 )
-      w.append_uint( SASS_REC_TYPE, SASS_REC_TYPE_LEN  , rec_type );
+      w.append_uint( MD_SASS_REC_TYPE, MD_SASS_REC_TYPE_LEN  , rec_type );
     if ( has_seq )
-      w.append_uint( SASS_SEQ_NO  , SASS_SEQ_NO_LEN    , seqno );
-    w.append_uint( SASS_REC_STATUS, SASS_REC_STATUS_LEN, status );
+      w.append_uint( MD_SASS_SEQ_NO  , MD_SASS_SEQ_NO_LEN    , seqno );
+    w.append_uint( MD_SASS_REC_STATUS, MD_SASS_REC_STATUS_LEN, status );
   }
   else {
     const MDFormEntry * e = form->entries;
     MDLookup by;
-    if ( form->get( by.nm( SASS_MSG_TYPE, SASS_MSG_TYPE_LEN ) ) == &e[ 0 ] )
+    if ( form->get( by.nm( MD_SASS_MSG_TYPE, MD_SASS_MSG_TYPE_LEN ) ) == &e[ 0 ] )
       w.append_uint( by.fname, by.fname_len, msg_type );
-    if ( form->get( by.nm( SASS_REC_TYPE, SASS_REC_TYPE_LEN ) ) == &e[ 1 ] )
+    if ( form->get( by.nm( MD_SASS_REC_TYPE, MD_SASS_REC_TYPE_LEN ) ) == &e[ 1 ] )
       w.append_uint( by.fname, by.fname_len, rec_type );
-    if ( form->get( by.nm( SASS_SEQ_NO, SASS_SEQ_NO_LEN ) ) == &e[ 2 ] )
+    if ( form->get( by.nm( MD_SASS_SEQ_NO, MD_SASS_SEQ_NO_LEN ) ) == &e[ 2 ] )
       w.append_uint( by.fname, by.fname_len, seqno );
-    if ( form->get( by.nm( SASS_REC_STATUS, SASS_REC_STATUS_LEN ) ) == &e[ 3 ] )
+    if ( form->get( by.nm( MD_SASS_REC_STATUS, MD_SASS_REC_STATUS_LEN ) ) == &e[ 3 ] )
       w.append_uint( by.fname, by.fname_len, status );
-    if ( form->get( by.nm( SASS_SYMBOL, SASS_SYMBOL_LEN ) ) == &e[ 4 ] )
+    if ( form->get( by.nm( MD_SASS_SYMBOL, MD_SASS_SYMBOL_LEN ) ) == &e[ 4 ] )
       w.append_string( by.fname, by.fname_len, subj, sublen );
   }
 }
@@ -368,8 +368,8 @@ void append_hdr( Writer &w,  MDFormClass *form,  uint16_t msg_type,
 template<class Writer>
 void append_status( Writer &w,  uint16_t msg_type,  uint16_t status ) noexcept
 {
-  w.append_uint( SASS_MSG_TYPE  , SASS_MSG_TYPE_LEN  , msg_type );
-  w.append_uint( SASS_REC_STATUS, SASS_REC_STATUS_LEN, status );
+  w.append_uint( MD_SASS_MSG_TYPE  , MD_SASS_MSG_TYPE_LEN  , msg_type );
+  w.append_uint( MD_SASS_REC_STATUS, MD_SASS_REC_STATUS_LEN, status );
 }
 
 void
@@ -412,27 +412,27 @@ RvOmmSubmgr::convert_to_msg( EvPublish &pub,  uint32_t type_id,
   RwfMsg     * fields     = m->get_container_msg();
   const char * name       = NULL;
   size_t       name_len   = 0;
-  uint16_t     msg_type   = UPDATE_TYPE,
-               rec_status = OK_STATUS;
+  uint16_t     msg_type   = MD_UPDATE_TYPE,
+               rec_status = MD_OK_STATUS;
 
   if ( m->msg.msg_class == REFRESH_MSG_CLASS ) {
     name     = m->msg.msg_key.name;
     name_len = m->msg.msg_key.name_len;
-    msg_type = INITIAL_TYPE;
+    msg_type = MD_INITIAL_TYPE;
     if ( fields != NULL ) {
       MDFieldReader rd( *fields );
       MDName nm;
-      if ( rd.first( nm ) && nm.equals( SASS_MSG_TYPE, SASS_MSG_TYPE_LEN ) ) {
+      if ( rd.first( nm ) && nm.equals( MD_SASS_MSG_TYPE, MD_SASS_MSG_TYPE_LEN ) ) {
         rd.get_uint( msg_type );
         for ( int i = 0; i < 3 && rd.next( nm ); i++ ) {
-          if ( nm.equals( SASS_REC_STATUS, SASS_REC_STATUS_LEN ) ) {
+          if ( nm.equals( MD_SASS_REC_STATUS, MD_SASS_REC_STATUS_LEN ) ) {
             char buf[ 32 ];
             size_t buflen = sizeof( buf );
             if ( rd.get_string( buf, sizeof( buf ), buflen ) ) {
               rec_status = sass_rec_status_val( buf, buflen );
-              if ( rec_status == NOT_FOUND_STATUS && msg_type == VERIFY_TYPE ) {
+              if ( rec_status == MD_NOT_FOUND_STATUS && msg_type == MD_VERIFY_TYPE ) {
                 has_seq  = false;
-                msg_type = TRANSIENT_TYPE;
+                msg_type = MD_TRANSIENT_TYPE;
               }
             }
             break;
@@ -443,9 +443,9 @@ RvOmmSubmgr::convert_to_msg( EvPublish &pub,  uint32_t type_id,
   }
   else if ( m->msg.msg_class == STATUS_MSG_CLASS ) {
     if ( m->msg.state.stream_state != STREAM_STATE_OPEN )
-      msg_type = DROP_TYPE;
+      msg_type = MD_DROP_TYPE;
     else
-      msg_type = TRANSIENT_TYPE;
+      msg_type = MD_TRANSIENT_TYPE;
     rec_status = rwf_code_to_sass_rec_status( *m );
   }
   else {
@@ -827,19 +827,19 @@ RvOmmSubmgr::feed_down_subs( void ) noexcept
 
     if ( type_id == RVMSG_TYPE_ID ) {
       RvMsgWriter w( this->cvt_mem, buf_ptr, sz );
-      append_status<RvMsgWriter>( w, TRANSIENT_TYPE, FEED_DOWN_STATUS );
+      append_status<RvMsgWriter>( w, MD_TRANSIENT_TYPE, MD_FEED_DOWN_STATUS );
       pub.msg     = w.buf;
       pub.msg_len = w.update_hdr();
     }
     else if ( type_id == TIBMSG_TYPE_ID ) {
       TibMsgWriter w( this->cvt_mem, buf_ptr, sz );
-      append_status<TibMsgWriter>( w, TRANSIENT_TYPE, FEED_DOWN_STATUS );
+      append_status<TibMsgWriter>( w, MD_TRANSIENT_TYPE, MD_FEED_DOWN_STATUS );
       pub.msg     = w.buf;
       pub.msg_len = w.update_hdr();
     }
     else {
       TibSassMsgWriter w( this->cvt_mem, this->dict.cfile_dict, buf_ptr, sz );
-      append_status<TibSassMsgWriter>( w, TRANSIENT_TYPE, FEED_DOWN_STATUS );
+      append_status<TibSassMsgWriter>( w, MD_TRANSIENT_TYPE, MD_FEED_DOWN_STATUS );
       pub.msg     = w.buf;
       pub.msg_len = w.update_hdr();
     }

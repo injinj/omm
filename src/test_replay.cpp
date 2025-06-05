@@ -117,7 +117,7 @@ TestReplay::timer_expire( uint64_t, uint64_t ) noexcept
   uint32_t seqno      = 0;
   int      status     = 0;
   uint16_t flist      = 0,
-           msg_type   = UPDATE_TYPE;
+           msg_type   = MD_UPDATE_TYPE;
 
   for (;;) {
     if ( fgets( subj_buf, sizeof( subj_buf ), this->fp ) == NULL )
@@ -197,27 +197,27 @@ TestReplay::timer_expire( uint64_t, uint64_t ) noexcept
     }
     default: {
       MDFieldReader rd( *m );
-      if ( rd.find( SASS_MSG_TYPE, SASS_MSG_TYPE_LEN ) )
+      if ( rd.find( MD_SASS_MSG_TYPE, MD_SASS_MSG_TYPE_LEN ) )
         rd.get_uint( msg_type );
-      if ( rd.find( SASS_SEQ_NO, SASS_SEQ_NO_LEN ) )
+      if ( rd.find( MD_SASS_SEQ_NO, MD_SASS_SEQ_NO_LEN ) )
         rd.get_uint( seqno );
       break;
     }
   }
-  RwfMsgClass  msg_class = ( msg_type == INITIAL_TYPE ? REFRESH_MSG_CLASS :
-                                                        UPDATE_MSG_CLASS );
+  RwfMsgClass  msg_class = ( msg_type == MD_INITIAL_TYPE ? REFRESH_MSG_CLASS :
+                                                           UPDATE_MSG_CLASS );
   uint32_t     stream_id = MDDict::dict_hash( subj, slen );
   char         tmp_buf[ 1024 ];
   RwfMsgWriter w( mem, this->dict.rdm_dict, tmp_buf, sizeof( tmp_buf ),
                   msg_class, MARKET_PRICE_DOMAIN, stream_id );
-  if ( msg_type == INITIAL_TYPE )
+  if ( msg_type == MD_INITIAL_TYPE )
     w.set( X_CLEAR_CACHE, X_REFRESH_COMPLETE );
   else {
-    if ( msg_type == CLOSING_TYPE )
+    if ( msg_type == MD_CLOSING_TYPE )
       w.add_update( UPD_TYPE_CLOSING_RUN );
-    else if ( msg_type == CORRECT_TYPE )
+    else if ( msg_type == MD_CORRECT_TYPE )
       w.add_update( UPD_TYPE_CORRECTION );
-    else if ( msg_type == VERIFY_TYPE )
+    else if ( msg_type == MD_VERIFY_TYPE )
       w.add_update( UPD_TYPE_VERIFY );
   }
   if ( seqno != 0 )
