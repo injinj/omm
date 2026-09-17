@@ -375,6 +375,7 @@ main( int argc, const char *argv[] )
              "  -k          = subscribe to numeric subjects (subject.%%d)\n"
              "  -Z          = use zipf(0.99) distribution\n"
              "  -t secs     = stop after seconds expire\n"
+             "  -g          = print all control messages\n"
              "  -q          = quiet, don't print messages\n"
              "  -S hex      = random seed1\n"
              "  -T hex      = random seed2\n"
@@ -446,7 +447,7 @@ main( int argc, const char *argv[] )
     conn.no_dictionary = true;
   /* load dictionary if present */
   if ( ! conn.no_dictionary ) {
-    conn.have_dictionary = dict.load_cfiles( path );
+    conn.have_dictionary = dict.load( path, true );
     if ( conn.have_dictionary )
       printf( "Loaded dictionary from cfiles\n" );
   }

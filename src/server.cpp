@@ -179,7 +179,7 @@ Loop::omm_init( void ) noexcept
   }
   this->r.source_db.add_source_listener( &this->print_srcs );
   printf( "omm_version:          " kv_stringify( OMM_VER ) "\n" );
-  if ( r.path != NULL && r.dict.load_cfiles( r.path ) ) {
+  if ( r.path != NULL && r.dict.load( r.path, true ) ) {
     if ( r.dict.rdm_dict != NULL )
       printf( "rdm dictionary:       %s (RDMFieldDictionary enumtype.def)\n",
               r.path );

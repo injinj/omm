@@ -285,7 +285,7 @@ rai::omm::print_dict_info( MDDict *d,  const char *fld_dict_name,
   printf( "%s\n\n", buf );
   fflush( stdout );
 }
-
+#if 0
 bool
 OmmDict::load_cfiles( const char *path ) noexcept
 {
@@ -314,3 +314,4 @@ OmmDict::load_cfiles( const char *path ) noexcept
   }
   return have_dictionary;
 }
+#endif

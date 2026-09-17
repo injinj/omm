@@ -7,7 +7,7 @@
 #include <raikv/array_space.h>
 #include <raikv/route_ht.h>
 #include <raimd/rwf_msg.h>
-#include <raimd/md_dict.h>
+#include <raimd/dict_load.h>
 #include <omm/ipc.h>
 
 namespace rai {
@@ -20,7 +20,7 @@ struct OmmSourceDB;
 struct OmmSource;
 struct DictInProg;
 struct IpcFrag;
-
+#if 0
 struct OmmDict {
   md::MDDict * dict,
              * flist_dict,
@@ -29,7 +29,8 @@ struct OmmDict {
   OmmDict() : dict( 0 ), flist_dict( 0 ), rdm_dict( 0 ), cfile_dict( 0 ) {}
   bool load_cfiles( const char *cfile_path ) noexcept;
 };
-
+#endif
+typedef struct md::MDMsgDict OmmDict;
 struct EvOmmListen : public kv::EvTcpListen {
   kv::RoutePublish & sub_route;
   OmmDict          & dict;
