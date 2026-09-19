@@ -383,6 +383,7 @@ dist_bins: $(all_libs) $(all_dlls) $(bind)/omm_server$(exe) $(bind)/omm_client$(
 	chrpath -d $(libd)/libomm.$(dll)
 	chrpath -d $(bind)/omm_server$(exe)
 	chrpath -d $(bind)/omm_client$(exe)
+	chrpath -d $(bind)/omm_api_client$(exe)
 
 .PHONY: dist_rpm
 dist_rpm: srpm
