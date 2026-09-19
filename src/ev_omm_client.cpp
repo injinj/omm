@@ -254,6 +254,14 @@ EvOmmClient::subscribe( const char *sub,  size_t len ) noexcept
 }
 
 void
+EvOmmClient::snapshot( const char *sub,  size_t len ) noexcept
+{
+  if ( ! this->send_snapshot( sub, len ) ) {
+    fprintf( stderr, "no source matches %.*s\n", (int) len, sub );
+  }
+}
+
+void
 EvOmmClient::unsubscribe( const char *sub,  size_t len ) noexcept
 {
   if ( ! this->send_unsubscribe( sub, len ) ) {

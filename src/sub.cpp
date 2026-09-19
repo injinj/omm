@@ -39,16 +39,13 @@ EvOmmClient::send_subscribe( const char *sub,  size_t sub_len,
     rt->domain     = domain;
     rt->stream_id  = stream_id;
     rt->msg_cnt    = 0;
-    if ( is_initial )
-      rt->is_solicited = true;
-    else
-      rt->is_solicited = false;
+    rt->stream_type = ( is_initial ? IS_SOLICITED : IS_NONE );
     this->stream_ht->upsert_rsz( this->stream_ht, stream_id, h );
   }
   else {
     if ( ! is_initial ) /* already subscribed */
       return true;
-    rt->is_solicited = true;
+    rt->stream_type = IS_SOLICITED;
     stream_id = rt->stream_id;
   }
   TempBuf      temp_buf = this->mktemp( 128 );
@@ -56,7 +53,7 @@ EvOmmClient::send_subscribe( const char *sub,  size_t sub_len,
   RwfMsgWriter msg( mem, NULL, temp_buf.msg, temp_buf.len,
                     REQUEST_MSG_CLASS, (RdmDomainType) domain, stream_id );
   msg.set( X_STREAMING );
-  if ( ! rt->is_solicited )
+  if ( rt->stream_type != IS_SOLICITED )
     msg.set( X_NO_REFRESH );
   msg.add_priority( 1, 1 )
      .add_qos( src->info.qos[ 0 ] )
@@ -73,16 +70,28 @@ EvOmmClient::send_subscribe( const char *sub,  size_t sub_len,
 bool
 EvOmmClient::send_snapshot( const char *sub,  size_t sub_len ) noexcept
 {
+  RouteLoc     loc;
   OmmSource  * src;
+  OmmRoute   * rt;
   const char * ric     = sub;
   size_t       ric_len = sub_len;
-  uint32_t     stream_id;
+  uint32_t     stream_id,
+               h       = kv_crc_c( sub, sub_len, 0 );
   uint8_t      domain  = MARKET_PRICE_DOMAIN;
 
   if ( (src = this->source_db.match_sub( ric, ric_len, domain,
                                          this->start_ns )) == NULL )
     return false;
+  /* a snapshot always gets its own stream, alongside any subscription of
+   * the same subject (find_stream walks the hash collisions) */
   stream_id = this->next_stream_id++;
+  rt = this->sub_tab.insert( h, sub, sub_len, loc );
+  rt->service_id  = src->service_id;
+  rt->domain      = domain;
+  rt->stream_id   = stream_id;
+  rt->msg_cnt     = 0;
+  rt->stream_type = IS_SNAPSHOT;
+  this->stream_ht->upsert_rsz( this->stream_ht, stream_id, h );
 
   TempBuf      temp_buf = this->mktemp( 128 );
   MDMsgMem     mem;
@@ -100,6 +109,33 @@ EvOmmClient::send_snapshot( const char *sub,  size_t sub_len ) noexcept
   return true;
 }
 
+/* the snapshot stream is done: a real ADS closes a non-streaming stream
+ * itself (stream_state NON_STREAMING / CLOSED in the refresh); a provider
+ * that treated it as streaming gets a CLOSE.  Either way the route goes */
+void
+EvOmmClient::close_snapshot( OmmSubjRoute &sub_rt,  RwfMsg &msg ) noexcept
+{
+  OmmRoute * rt = sub_rt.rt;
+  if ( msg.msg.state.stream_state == STREAM_STATE_OPEN ) {
+    TempBuf      temp_buf = this->mktemp( 128 );
+    MDMsgMem     mem;
+    RwfMsgWriter cls( mem, NULL, temp_buf.msg, temp_buf.len,
+                      CLOSE_MSG_CLASS, (RdmDomainType) rt->domain,
+                      rt->stream_id );
+    cls.add_msg_key()
+       .service_id( rt->service_id )
+       .name( rt->value, rt->len )
+       .name_type( NAME_TYPE_RIC )
+    .end_msg();
+    this->send_msg( "close snapshot", cls, temp_buf );
+    this->idle_push_write();
+  }
+  size_t pos;
+  if ( this->stream_ht->find( rt->stream_id, pos ) )
+    this->stream_ht->remove_rsz( this->stream_ht, pos );
+  this->sub_tab.remove( sub_rt.loc );
+}
+
 bool
 EvOmmClient::send_unsubscribe( const char *sub,  size_t sub_len ) noexcept
 {
@@ -115,7 +151,10 @@ EvOmmClient::send_unsubscribe( const char *sub,  size_t sub_len ) noexcept
                                          this->start_ns )) == NULL )
     return false;
   
-  if ( (rt = this->sub_tab.find( h, sub, sub_len, loc )) == NULL )
+  rt = this->sub_tab.find( h, sub, sub_len, loc );
+  while ( rt != NULL && rt->stream_type == IS_SNAPSHOT ) /* skip snapshots */
+    rt = this->sub_tab.find_next( h, sub, sub_len, loc );
+  if ( rt == NULL )
     return false;
 
   TempBuf      temp_buf = this->mktemp( 128 );
@@ -150,6 +189,17 @@ EvOmmClient::forward_msg( RwfMsg &msg ) noexcept
       this->publish_msg( msg, sub_rt );
     else
       this->cb->on_omm_msg( sub_rt.rt->value, sub_rt.rt->len, sub_rt.hash, msg);
+    /* a snapshot stream ends with its refresh (or a status closing it) */
+    if ( sub_rt.rt->stream_type == IS_SNAPSHOT ) {
+      bool done = false;
+      if ( msg.msg.msg_class == REFRESH_MSG_CLASS )
+        done = msg.msg.test( X_REFRESH_COMPLETE );
+      else if ( msg.msg.msg_class == STATUS_MSG_CLASS )
+        done = ( msg.msg.test( X_HAS_STATE ) &&
+                 msg.msg.state.stream_state != STREAM_STATE_OPEN );
+      if ( done )
+        this->close_snapshot( sub_rt, msg );
+    }
   }
 }
 
@@ -166,9 +216,9 @@ EvOmmConn::on_msg( EvPublish &pub ) noexcept
     if ( msg_class == REFRESH_MSG_CLASS ) {
       uint16_t msg_flags = RwfMsgPeek::get_msg_flags( pub.msg, pub.msg_len );
       if ( ( msg_flags & RWF_REFRESH_SOLICITED ) != 0 ) {
-        if ( ! rt->is_solicited )
+        if ( rt->stream_type != IS_SOLICITED )
           return true;
-        rt->is_solicited = false;
+        rt->stream_type = IS_NONE;
       }
     }
     rt->msg_cnt++;
@@ -308,7 +358,7 @@ EvOmmConn::add_subj_stream( RwfMsgHdr &hdr,  OmmSubject &subj,
     sub_rt.rt->domain       = hdr.domain_type;
     sub_rt.rt->stream_id    = hdr.stream_id;
     sub_rt.rt->msg_cnt      = 0;
-    sub_rt.rt->is_solicited = false;
+    sub_rt.rt->stream_type  = IS_NONE;
 
     this->stream_ht->set_rsz( this->stream_ht, hdr.stream_id, sub_rt.pos,
                               subj.hash );
@@ -339,7 +389,7 @@ EvOmmService::process_msg( RwfMsg &msg ) noexcept
     NotifySub nsub( subj.sub, subj.sub_len, NULL, 0, subj.hash,
                     sub_rt.hcnt > 0, 'O', *this );
 
-    sub_rt.rt->is_solicited = true;
+    sub_rt.rt->stream_type = IS_SOLICITED;
     nsub.notify_type = NOTIFY_IS_INITIAL;
     if ( sub_rt.loc.is_new ) {
       this->sub_route.add_sub( nsub );

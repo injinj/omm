@@ -282,6 +282,42 @@ $(bind)/omm_client$(exe): $(omm_client_objs) $(omm_client_libs) $(lnk_dep)
 all_exes    += $(bind)/omm_client$(exe)
 all_depends += $(omm_client_deps)
 
+# --- libommapi: the thread-safe consumer api (include/omm/ommapi.h) over
+# libomm + raikv's ev_api_queue core; mirrors sassrv's librv7lib ------------
+omm_api_defines := -DOMM_VER=$(ver_build)
+$(objd)/omm_api.o : .copr/Makefile
+$(objd)/omm_api.fpic.o : .copr/Makefile
+libommapi_files := omm_api
+libommapi_cfile := $(addprefix src/, $(addsuffix .cpp, $(libommapi_files)))
+libommapi_objs  := $(addprefix $(objd)/, $(addsuffix .o, $(libommapi_files)))
+libommapi_dbjs  := $(addprefix $(objd)/, $(addsuffix .fpic.o, $(libommapi_files)))
+libommapi_deps  := $(addprefix $(dependd)/, $(addsuffix .d, $(libommapi_files))) \
+                   $(addprefix $(dependd)/, $(addsuffix .fpic.d, $(libommapi_files)))
+libommapi_dlnk  := $(omm_dlnk_lib) $(dlnk_lib)
+libommapi_spec  := $(version)-$(build_num)_$(git_hash)
+libommapi_ver   := $(major_num).$(minor_num)
+
+$(libd)/libommapi.a: $(libommapi_objs)
+$(libd)/libommapi.$(dll): $(libommapi_dbjs) $(omm_dlnk_dep) $(dlnk_dep)
+
+all_libs    += $(libd)/libommapi.a
+all_dlls    += $(libd)/libommapi.$(dll)
+all_depends += $(libommapi_deps)
+ommapi_lib  := $(libd)/libommapi.a
+
+# api sample / test: subscribe with the api, print messages
+omm_api_client_files := api_client
+omm_api_client_cfile := $(addprefix src/, $(addsuffix .cpp, $(omm_api_client_files)))
+omm_api_client_objs  := $(addprefix $(objd)/, $(addsuffix .o, $(omm_api_client_files)))
+omm_api_client_deps  := $(addprefix $(dependd)/, $(addsuffix .d, $(omm_api_client_files)))
+omm_api_client_libs  := $(ommapi_lib) $(omm_lib)
+omm_api_client_lnk   := $(ommapi_lib) $(omm_lib) $(lnk_lib)
+
+$(bind)/omm_api_client$(exe): $(omm_api_client_objs) $(omm_api_client_libs) $(lnk_dep)
+
+all_exes    += $(bind)/omm_api_client$(exe)
+all_depends += $(omm_api_client_deps)
+
 #omm_pub_files := pub
 #omm_pub_cfile := $(addprefix src/, $(addsuffix .cpp, $(omm_pub_files)))
 #omm_pub_objs  := $(addprefix $(objd)/, $(addsuffix .o, $(omm_pub_files)))
@@ -365,7 +401,7 @@ endif
 install: dist_bins
 	install -d $(install_prefix)/lib $(install_prefix)/bin
 	install -d $(install_prefix)/include/omm
-	for f in $(libd)/libomm.* ; do \
+	for f in $(libd)/libomm.* $(libd)/libommapi.* ; do \
 	if [ -h $$f ] ; then \
 	cp -a $$f $(install_prefix)/lib ; \
 	else \
@@ -374,6 +410,7 @@ install: dist_bins
 	done
 	install -m 755 $(bind)/omm_server$(exe) $(install_prefix)/bin
 	install -m 755 $(bind)/omm_client$(exe) $(install_prefix)/bin
+	install -m 755 $(bind)/omm_api_client$(exe) $(install_prefix)/bin
 	install -m 644 include/omm/*.h $(install_prefix)/include/omm
 
 $(objd)/%.o: src/%.cpp

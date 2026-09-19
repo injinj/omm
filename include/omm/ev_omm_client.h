@@ -79,6 +79,9 @@ struct EvOmmClient : public EvOmmConn, public kv::RouteNotify {
   bool dispatch_msg( IpcHdr &ipc,  char *buf ) noexcept;
   void subscribe( const char *sub,  size_t len ) noexcept;
   void unsubscribe( const char *sub,  size_t len ) noexcept;
+  /* non-streaming request on its own stream id; the refresh is delivered
+   * like a subscription's and then the stream is closed and forgotten */
+  void snapshot( const char *sub,  size_t len ) noexcept;
 
   void send_client_init_rec( void ) noexcept;
   void send_login_request( void ) noexcept;
@@ -94,6 +97,9 @@ struct EvOmmClient : public EvOmmConn, public kv::RouteNotify {
   bool send_snapshot( const char *sub,  size_t len ) noexcept;
   bool send_unsubscribe( const char *sub,  size_t len ) noexcept;
   void forward_msg( md::RwfMsg &msg ) noexcept;
+  /* after a snapshot stream's refresh: close it if the provider left it
+   * open, drop the route */
+  void close_snapshot( OmmSubjRoute &sub_rt,  md::RwfMsg &msg ) noexcept;
 
   virtual void on_sub( kv::NotifySub &sub ) noexcept;
   virtual void on_resub( kv::NotifySub &sub ) noexcept;

@@ -41,13 +41,23 @@ struct EvOmmListen : public kv::EvTcpListen {
   virtual kv::EvSocket *accept( void ) noexcept;
 };
 
+/* what the stream expects next: a solicited refresh (a new / re-requested
+ * subscription, or a provider side item request), nothing in particular
+ * (updates flowing), or it is a non-streaming request whose refresh ends
+ * it (client side: the route is dropped when the refresh completes) */
+enum OmmStreamType {
+  IS_NONE      = 0,
+  IS_SOLICITED = 1,
+  IS_SNAPSHOT  = 2
+};
+
 struct OmmRoute {
   uint32_t stream_id,
            service_id,
            hash,
            msg_cnt;
-  uint8_t  domain;
-  bool     is_solicited;
+  uint8_t  domain,
+           stream_type; /* OmmStreamType */
   uint16_t len;
   char     value[ 2 ];
 };
