@@ -378,7 +378,8 @@ $(dependd)/depend.make: $(dependd) $(all_depends)
 	@cat $(all_depends) >> $(dependd)/depend.make
 
 .PHONY: dist_bins
-dist_bins: $(all_libs) $(all_dlls) $(bind)/omm_server$(exe) $(bind)/omm_client$(exe)
+dist_bins: $(all_libs) $(all_dlls) $(bind)/omm_server$(exe) $(bind)/omm_client$(exe) $(bind)/omm_api_client$(exe)
+	chrpath -d $(libd)/libommapi.$(dll)
 	chrpath -d $(libd)/libomm.$(dll)
 	chrpath -d $(bind)/omm_server$(exe)
 	chrpath -d $(bind)/omm_client$(exe)
