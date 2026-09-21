@@ -8,6 +8,7 @@
 #include <raikv/win.h>
 #endif
 #include <omm/ev_omm.h>
+#include <omm/src_dir.h>
 #include <omm/ipc.h>
 #include <raikv/key_hash.h>
 #include <raikv/util.h>
@@ -203,6 +204,10 @@ EvOmmService::release( void ) noexcept
 {
   printf( "release %.*s\n", (int) this->get_peer_address_strlen(),
           this->peer_address.buf );
+  if ( this->dir_stream_id != 0 ) {
+    this->source_db.listener_list.pop( this );
+    this->dir_stream_id = 0;
+  }
   this->close_streams();
   this->release_streams();
   this->EvConnection::release_buffers();

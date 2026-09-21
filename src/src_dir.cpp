@@ -109,6 +109,11 @@ EvOmmService::recv_directory_request( RwfMsg &msg ) noexcept
         .end_msg();
 
     this->send_msg( "directory_response", resp, temp_buf );
+    /* keep the directory stream: source changes are pushed as updates */
+    if ( this->dir_stream_id == 0 )
+      this->source_db.add_source_listener( this );
+    this->dir_stream_id = hdr.stream_id;
+    this->dir_filter    = filter;
   }
   else if ( hdr.msg_class == REFRESH_MSG_CLASS ) {
     if ( is_omm_debug )
@@ -153,7 +158,39 @@ EvOmmService::recv_directory_request( RwfMsg &msg ) noexcept
   else if ( hdr.msg_class == CLOSE_MSG_CLASS ) {
     if ( is_omm_debug )
       debug_print( "directory_close", msg );
-    printf( "directory closed\n" );
+    if ( this->dir_stream_id != 0 && hdr.stream_id == this->dir_stream_id ) {
+      this->source_db.listener_list.pop( this );
+      this->dir_stream_id = 0;
+    }
+  }
+}
+
+/* OmmSrcListener: the directory changed (a publisher joined / left, a
+ * service state flipped) -> directory UPDATE to a consumer holding the
+ * directory stream, an ADS style push instead of a re-request */
+void
+EvOmmService::on_src_change( void ) noexcept
+{
+  if ( this->dir_stream_id != 0 )
+    this->send_directory_update();
+}
+
+void
+EvOmmService::send_directory_update( void ) noexcept
+{
+  TempBuf      temp_buf = this->mktemp( 8 * 1024 );
+  MDMsgMem     mem;
+  RwfMsgWriter upd( mem, NULL, temp_buf.msg, temp_buf.len,
+                    UPDATE_MSG_CLASS, SOURCE_DOMAIN, this->dir_stream_id );
+  upd.add_msg_key()
+       .filter( this->dir_filter )
+     .end_msg_key();
+  upd.add_map( MD_UINT )
+     .apply( *this, &EvOmmService::add_source_dirs, this->dir_filter )
+     .end_msg();
+  if ( upd.err == 0 ) {
+    this->send_msg( "directory_update", upd, temp_buf );
+    this->idle_push_write();
   }
 }
 

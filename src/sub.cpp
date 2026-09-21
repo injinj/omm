@@ -203,41 +203,163 @@ EvOmmClient::forward_msg( RwfMsg &msg ) noexcept
   }
 }
 
+/* provider publish path: a message for a subject goes to EVERY stream a
+ * consumer has open on it (an ADS stamps each stream id), with the rules:
+ *  - solicited refresh: only to streams that asked (IS_SOLICITED), and to
+ *    snapshot streams, which it also closes (state -> NON_STREAMING)
+ *  - unsolicited refresh (the source re-sent the image): to all streams;
+ *    it satisfies a pending solicited request and closes snapshots too
+ *  - update: streaming, unpaused streams only
+ *  - status: all streams; a closing stream state drops them */
 bool
 EvOmmConn::on_msg( EvPublish &pub ) noexcept
 {
-  OmmRoute *rt;
-  rt = this->sub_tab.find( pub.subj_hash, pub.subject, pub.subject_len );
+  if ( pub.msg_enc != RWF_MSG_TYPE_ID )
+    return true;
+  RouteLoc   loc;
+  OmmRoute * rt = this->sub_tab.find( pub.subj_hash, pub.subject,
+                                      pub.subject_len, loc );
   if ( rt == NULL )
     return true;
 
-  if ( pub.msg_enc == RWF_MSG_TYPE_ID ) {
-    uint8_t msg_class = RwfMsgPeek::get_msg_class( pub.msg, pub.msg_len );
-    if ( msg_class == REFRESH_MSG_CLASS ) {
-      uint16_t msg_flags = RwfMsgPeek::get_msg_flags( pub.msg, pub.msg_len );
-      if ( ( msg_flags & RWF_REFRESH_SOLICITED ) != 0 ) {
-        if ( rt->stream_type != IS_SOLICITED )
-          return true;
-        rt->stream_type = IS_NONE;
+  const uint8_t * m         = (const uint8_t *) pub.msg;
+  uint8_t         msg_class = RwfMsgPeek::get_msg_class( m, pub.msg_len );
+  uint16_t        msg_flags = RwfMsgPeek::get_msg_flags( m, pub.msg_len );
+  size_t          state_off = 0; /* refresh: where the state byte is */
+  bool            solicited = false,
+                  closing   = false;
+
+  if ( msg_class == REFRESH_MSG_CLASS ) {
+    solicited = ( msg_flags & RWF_REFRESH_SOLICITED ) != 0;
+    /* hdr_size(2) class(1) domain(1) stream(4) flags(u15) container(1)
+     * [seq_num(4)] state */
+    state_off = 8 + ( m[ 8 ] < 0x80 ? 1 : 2 ) + 1 +
+                ( ( msg_flags & RWF_REFRESH_HAS_SEQ_NUM ) != 0 ? 4 : 0 );
+    if ( state_off >= pub.msg_len )
+      state_off = 0;
+  }
+  else if ( msg_class == STATUS_MSG_CLASS ) {
+    if ( ( msg_flags & RWF_STATUS_HAS_STATE ) != 0 ) {
+      /* hdr(8) flags container [state] */
+      size_t off = 8 + ( m[ 8 ] < 0x80 ? 1 : 2 ) + 1;
+      if ( off < pub.msg_len )
+        closing = ( ( m[ off ] >> 3 ) != STREAM_STATE_OPEN );
+    }
+  }
+
+  uint32_t closed_ids[ 64 ];
+  uint32_t ncl = 0;
+  for ( ; rt != NULL;
+        rt = this->sub_tab.find_next( pub.subj_hash, pub.subject,
+                                      pub.subject_len, loc ) ) {
+    bool   send = true, drop = false;
+    size_t st   = 0;
+    switch ( msg_class ) {
+      case REFRESH_MSG_CLASS:
+        if ( rt->stream_type == IS_SNAPSHOT ) {
+          st   = state_off; /* rewrite OPEN -> NON_STREAMING */
+          drop = true;
+        }
+        else if ( solicited ) {
+          if ( rt->stream_type != IS_SOLICITED )
+            send = false;
+          else
+            rt->stream_type = IS_NONE;
+        }
+        else if ( rt->stream_type == IS_SOLICITED )
+          rt->stream_type = IS_NONE; /* the image arrived unsolicited */
+        break;
+      case UPDATE_MSG_CLASS:
+        if ( ( rt->rt_flags & RT_STREAMING ) == 0 ||
+             ( rt->rt_flags & RT_PAUSED ) != 0 || rt->stream_type == IS_SNAPSHOT )
+          send = false;
+        break;
+      case STATUS_MSG_CLASS:
+        drop = closing;
+        break;
+      default:
+        break;
+    }
+    if ( send ) {
+      rt->msg_cnt++;
+      this->send_stream_msg( *rt, m, pub.msg_len, st );
+    }
+    if ( drop && ncl < 64 )
+      closed_ids[ ncl++ ] = rt->stream_id;
+  }
+  /* drop the streams that ended; the subject's last one unsubscribes */
+  for ( uint32_t i = 0; i < ncl; i++ ) {
+    OmmSubjRoute sub_rt;
+    if ( this->find_stream( closed_ids[ i ], sub_rt, false ) ) {
+      bool last = this->remove_stream( sub_rt );
+      if ( last ) {
+        NotifySub nsub( pub.subject, pub.subject_len, NULL, 0, pub.subj_hash,
+                        false, 'O', *this );
+        this->sub_route.del_sub( nsub );
       }
     }
-    rt->msg_cnt++;
-    size_t len = pub.msg_len + 3;
-    if ( len > this->max_frag_size )
-      this->fragment_msg( (const uint8_t *) pub.msg, pub.msg_len,
-                          rt->stream_id );
-    else {
-      uint8_t * buf = (uint8_t *) this->alloc( len );
-      ::memcpy( &buf[ 3 ], pub.msg, pub.msg_len );
-      set_u32<MD_BIG>( &buf[ 3 + 4 ], rt->stream_id );
-      buf[ 0 ] = (uint8_t) ( ( len >> 8 ) & 0xff );
-      buf[ 1 ] = (uint8_t) ( len & 0xff );
-      buf[ 2 ] = IPC_DATA;
-      this->sz += len;
-    }
-    this->idle_push_write();
   }
+  this->idle_push_write();
   return true;
+}
+
+/* copy msg to the connection with rt's stream id; state_off != 0 rewrites
+ * the refresh state to NON_STREAMING (a snapshot's refresh ends it) */
+void
+EvOmmConn::send_stream_msg( OmmRoute &rt,  const void *msg,  size_t msg_len,
+                            size_t state_off ) noexcept
+{
+  size_t len = msg_len + 3;
+  if ( len > this->max_frag_size ) {
+    /* fragment_msg stamps the stream id; state rewrite needs a copy */
+    if ( state_off == 0 )
+      this->fragment_msg( (const uint8_t *) msg, msg_len, rt.stream_id );
+    else {
+      uint8_t * tmp = (uint8_t *) this->alloc_temp( msg_len );
+      ::memcpy( tmp, msg, msg_len );
+      tmp[ state_off ] = (uint8_t) ( ( STREAM_STATE_NON_STREAMING << 3 ) |
+                                     ( tmp[ state_off ] & 7 ) );
+      this->fragment_msg( tmp, msg_len, rt.stream_id );
+    }
+    return;
+  }
+  uint8_t * buf = (uint8_t *) this->alloc( len );
+  ::memcpy( &buf[ 3 ], msg, msg_len );
+  set_u32<MD_BIG>( &buf[ 3 + 4 ], rt.stream_id );
+  if ( state_off != 0 )
+    buf[ 3 + state_off ] = (uint8_t) ( ( STREAM_STATE_NON_STREAMING << 3 ) |
+                                       ( buf[ 3 + state_off ] & 7 ) );
+  buf[ 0 ] = (uint8_t) ( ( len >> 8 ) & 0xff );
+  buf[ 1 ] = (uint8_t) ( len & 0xff );
+  buf[ 2 ] = IPC_DATA;
+  this->sz += len;
+}
+
+uint32_t
+EvOmmConn::count_subject_routes( uint32_t hash,  const char *sub,
+                                 size_t sub_len,
+                                 const OmmRoute *except ) noexcept
+{
+  RouteLoc   loc;
+  uint32_t   n  = 0;
+  OmmRoute * rt = this->sub_tab.find( hash, sub, sub_len, loc );
+  for ( ; rt != NULL; rt = this->sub_tab.find_next( hash, sub, sub_len, loc ) )
+    if ( rt != except && rt->domain != 0 )
+      n++;
+  return n;
+}
+
+bool
+EvOmmConn::remove_stream( OmmSubjRoute &sub_rt ) noexcept
+{
+  OmmRoute * rt   = sub_rt.rt;
+  bool       last = ( this->count_subject_routes( rt->hash, rt->value, rt->len,
+                                                  rt ) == 0 );
+  size_t pos;
+  if ( this->stream_ht->find( rt->stream_id, pos ) )
+    this->stream_ht->remove_rsz( this->stream_ht, pos );
+  this->sub_tab.remove( sub_rt.loc );
+  return last;
 }
 
 bool
@@ -263,6 +385,7 @@ EvOmmConn::find_stream( uint32_t stream_id,  OmmSubjRoute &sub_rt,
   return false;
 }
 
+/* connection going away: every stream closes; one unsubscribe per subject */
 void
 EvOmmConn::close_streams( void ) noexcept
 {
@@ -272,30 +395,19 @@ EvOmmConn::close_streams( void ) noexcept
   for ( bool b = this->stream_ht->first( sub_rt.pos ); b;
         b = this->stream_ht->next( sub_rt.pos ) ) {
     this->stream_ht->get( sub_rt.pos, stream_id, sub_rt.hash );
-
-    sub_rt.rt   = this->sub_tab.find_by_hash( sub_rt.hash, sub_rt.loc );
-    sub_rt.hcnt = 0;
+    sub_rt.rt = this->sub_tab.find_by_hash( sub_rt.hash, sub_rt.loc );
     while ( sub_rt.rt != NULL ) {
-      if ( sub_rt.rt->domain != 0 ) {
-        sub_rt.hcnt++;
-        if ( sub_rt.rt->stream_id == stream_id ) {
-          if ( sub_rt.hcnt == 1 ) {
-            RouteLoc tmp_loc = sub_rt.loc;
-            do {
-              OmmRoute *rt =
-                this->sub_tab.find_next_by_hash( sub_rt.hash, tmp_loc );
-              if ( rt == NULL )
-                break;
-              if ( rt->domain != 0 )
-                sub_rt.hcnt++;
-            } while ( sub_rt.hcnt == 1 );
+      if ( sub_rt.rt->stream_id == stream_id ) {
+        if ( sub_rt.rt->domain != 0 ) {
+          OmmRoute & rt = *sub_rt.rt;
+          rt.domain = 0; /* closed */
+          if ( this->count_subject_routes( rt.hash, rt.value, rt.len ) == 0 ) {
+            NotifySub nsub( rt.value, rt.len, NULL, 0, rt.hash, false, 'O',
+                            *this );
+            this->sub_route.del_sub( nsub );
           }
-          NotifySub nsub( sub_rt.rt->value, sub_rt.rt->len, NULL, 0,
-                          sub_rt.hash, sub_rt.hcnt > 1, 'O', *this );
-          this->sub_route.del_sub( nsub );
-          sub_rt.rt->domain = 0;
-          break;
         }
+        break;
       }
       sub_rt.rt = this->sub_tab.find_next_by_hash( sub_rt.hash, sub_rt.loc );
     }
@@ -340,29 +452,41 @@ EvOmmConn::msg_key_to_sub( RwfMsgHdr &hdr,  OmmSubject &subj ) noexcept
   return false;
 }
 
+/* open a stream for a request / a publisher refresh.  The stream id is the
+ * key: a new id always gets its own route (several per subject are fine),
+ * an open id with the same subject is a reissue (loc.is_new false), an open
+ * id with another subject is refused.  hcnt = routes the subject already
+ * had on this connection (0 -> first, the route table gets an add_sub) */
 bool
 EvOmmConn::add_subj_stream( RwfMsgHdr &hdr,  OmmSubject &subj,
                             OmmSubjRoute &sub_rt ) noexcept
 {
-  sub_rt.rt = this->sub_tab.upsert2( subj.hash, subj.sub, subj.sub_len,
-                                     sub_rt.loc, sub_rt.hcnt );
+  if ( this->find_stream( hdr.stream_id, sub_rt, false ) ) {
+    OmmRoute & rt = *sub_rt.rt;
+    if ( rt.hash != subj.hash || rt.len != subj.sub_len ||
+         ::memcmp( rt.value, subj.sub, subj.sub_len ) != 0 )
+      return false; /* stream id busy with another item */
+    sub_rt.loc.is_new = false;
+    sub_rt.hcnt = this->count_subject_routes( subj.hash, subj.sub,
+                                              subj.sub_len, &rt );
+    return true;
+  }
+  sub_rt.hcnt = this->count_subject_routes( subj.hash, subj.sub, subj.sub_len );
+  sub_rt.rt   = this->sub_tab.insert( subj.hash, subj.sub, subj.sub_len,
+                                      sub_rt.loc );
   if ( sub_rt.rt == NULL )
     return false;
-  if ( ! sub_rt.loc.is_new && sub_rt.rt->stream_id != hdr.stream_id )
-    return false;
-  if ( this->stream_ht->find( hdr.stream_id, sub_rt.pos ) )
-    return false;
-
-  if ( sub_rt.loc.is_new ) {
-    sub_rt.rt->service_id   = subj.src->service_id;
-    sub_rt.rt->domain       = hdr.domain_type;
-    sub_rt.rt->stream_id    = hdr.stream_id;
-    sub_rt.rt->msg_cnt      = 0;
-    sub_rt.rt->stream_type  = IS_NONE;
-
-    this->stream_ht->set_rsz( this->stream_ht, hdr.stream_id, sub_rt.pos,
-                              subj.hash );
-  }
+  sub_rt.loc.is_new = true;
+  OmmRoute & rt   = *sub_rt.rt;
+  rt.service_id   = subj.src->service_id;
+  rt.domain       = hdr.domain_type;
+  rt.stream_id    = hdr.stream_id;
+  rt.msg_cnt      = 0;
+  rt.stream_type  = IS_NONE;
+  rt.rt_flags     = RT_STREAMING;
+  rt.prio_class   = 1;
+  rt.prio_count   = 1;
+  this->stream_ht->upsert_rsz( this->stream_ht, hdr.stream_id, subj.hash );
   return true;
 }
 
@@ -377,33 +501,14 @@ EvOmmService::process_msg( RwfMsg &msg ) noexcept
     debug_print( "item_request", msg );
 
   if ( hdr.msg_class == REQUEST_MSG_CLASS ) {
-    if ( ! this->msg_key_to_sub( hdr, subj ) ) {
-      this->send_status( msg, STATUS_CODE_INVALID_ARGUMENT,
-                         "No service id route" );
-      return;
-    }
-    if ( ! this->add_subj_stream( hdr, subj, sub_rt ) ) {
-      this->send_status( msg, STATUS_CODE_ALREADY_OPEN, "Already subscribed" );
-      return;
-    }
-    NotifySub nsub( subj.sub, subj.sub_len, NULL, 0, subj.hash,
-                    sub_rt.hcnt > 0, 'O', *this );
-
-    sub_rt.rt->stream_type = IS_SOLICITED;
-    nsub.notify_type = NOTIFY_IS_INITIAL;
-    if ( sub_rt.loc.is_new ) {
-      this->sub_route.add_sub( nsub );
-    }
-    else {
-      nsub.sub_count = 1;
-      this->sub_route.notify_sub( nsub );
-    }
+    this->request_stream( msg, subj );
   }
   else if ( hdr.msg_class == REFRESH_MSG_CLASS ) {
+    /* a publisher pushing an item into the service */
     if ( ! this->msg_key_to_sub( hdr, subj ) )
       return;
     if ( ! this->add_subj_stream( hdr, subj, sub_rt ) ) {
-      fprintf( stderr, "Already have stream assigned\n" );
+      fprintf( stderr, "Stream %u already assigned\n", hdr.stream_id );
       return;
     }
     this->publish_msg( msg, sub_rt );
@@ -414,12 +519,83 @@ EvOmmService::process_msg( RwfMsg &msg ) noexcept
       this->publish_msg( msg, sub_rt );
   }
   else if ( hdr.msg_class == CLOSE_MSG_CLASS ) {
-    if ( this->find_stream( hdr.stream_id, sub_rt, true ) ) {
-      NotifySub nsub( sub_rt.rt->value, sub_rt.rt->len, NULL, 0, sub_rt.hash,
-                      sub_rt.hcnt > 1, 'O', *this );
+    this->close_stream( hdr );
+  }
+}
+
+/* consumer item request */
+bool
+EvOmmService::request_stream( RwfMsg &msg,  OmmSubject &subj ) noexcept
+{
+  RwfMsgHdr  & hdr = msg.msg;
+  OmmSubjRoute sub_rt;
+
+  if ( hdr.test( X_HAS_BATCH ) ) {
+    this->send_status( msg, STATUS_CODE_USAGE_ERROR,
+                       "Batch requests not supported" );
+    return false;
+  }
+  if ( ! this->msg_key_to_sub( hdr, subj ) ) {
+    this->send_status( msg, STATUS_CODE_SOURCE_UNKNOWN, "No such service" );
+    return false;
+  }
+  if ( ! this->add_subj_stream( hdr, subj, sub_rt ) ) {
+    this->send_status( msg, STATUS_CODE_ALREADY_OPEN,
+                       "Stream id is open for another item" );
+    return false;
+  }
+  OmmRoute & rt = *sub_rt.rt;
+  bool streaming = hdr.test( X_STREAMING ),
+       no_refresh = hdr.test( X_NO_REFRESH ),
+       pause      = hdr.test( X_PAUSE_FLAG ),
+       reissue    = ! sub_rt.loc.is_new;
+  /* request options; a reissue may change them */
+  if ( streaming ) rt.rt_flags |= RT_STREAMING; else rt.rt_flags &= ~RT_STREAMING;
+  if ( hdr.test( X_MSG_KEY_IN_UPDATES ) ) rt.rt_flags |= RT_KEY_IN_UPDATES;
+  if ( hdr.test( X_PRIVATE_STREAM ) )     rt.rt_flags |= RT_PRIVATE;
+  if ( pause ) rt.rt_flags |= RT_PAUSED; else rt.rt_flags &= ~RT_PAUSED;
+  if ( hdr.test( X_HAS_PRIORITY ) ) {
+    rt.prio_class = hdr.priority.clas;
+    rt.prio_count = hdr.priority.count;
+  }
+  /* X_HAS_VIEW: accepted, the full record is sent */
+  if ( ! streaming )
+    rt.stream_type = IS_SNAPSHOT;
+  else if ( ! no_refresh )
+    rt.stream_type = IS_SOLICITED;
+  else if ( ! reissue )
+    rt.stream_type = IS_NONE;
+
+  /* the route table sees one subscription per subject per connection:
+   * the first stream adds it, more streams / reissues re-notify it (the
+   * source sends a solicited image again) */
+  NotifySub nsub( subj.sub, subj.sub_len, NULL, 0, subj.hash,
+                  sub_rt.hcnt > 0, 'O', *this );
+  nsub.notify_type = NOTIFY_IS_INITIAL;
+  if ( sub_rt.loc.is_new && sub_rt.hcnt == 0 )
+    this->sub_route.add_sub( nsub );
+  else if ( ! no_refresh || ! streaming ) {
+    nsub.sub_count = 1;
+    this->sub_route.notify_sub( nsub );
+  }
+  return true;
+}
+
+/* consumer CLOSE: that stream only; the subject unsubscribes with its last */
+void
+EvOmmService::close_stream( RwfMsgHdr &hdr ) noexcept
+{
+  OmmSubjRoute sub_rt;
+  if ( this->find_stream( hdr.stream_id, sub_rt, false ) ) {
+    OmmRoute & rt   = *sub_rt.rt;
+    uint32_t   hash = rt.hash;
+    uint16_t   len  = rt.len;
+    char       subj[ 1024 ];
+    if ( len > sizeof( subj ) ) len = sizeof( subj );
+    ::memcpy( subj, rt.value, len );
+    if ( this->remove_stream( sub_rt ) ) {
+      NotifySub nsub( subj, len, NULL, 0, hash, false, 'O', *this );
       this->sub_route.del_sub( nsub );
-      this->stream_ht->remove( sub_rt.pos );
-      this->sub_tab.remove( sub_rt.loc );
     }
   }
 }
