@@ -41,14 +41,26 @@ void
 TestPublish::add_test_source( const char *feed_name,
                               uint32_t service_id ) noexcept
 {
+  add_test_source_dir( this->dict, this->source_db, this->start_ns,
+                       feed_name, service_id );
+}
+
+/* the test service directory: MARKET_PRICE (TestPublish) and the book
+ * domains (BookPublish) on one service id */
+void
+rai::omm::add_test_source_dir( OmmDict &dict_ref,  OmmSourceDB &source_db,
+                               uint64_t start_ns,  const char *feed_name,
+                               uint32_t service_id ) noexcept
+{
   static const char * dict[ 2 ] = { "RWFFld", "RWFEnum" };
-  static uint8_t cap[ 4 ] = { LOGIN_DOMAIN, SOURCE_DOMAIN, DICTIONARY_DOMAIN,
-                              MARKET_PRICE_DOMAIN };
+  static uint8_t cap[ 6 ] = { LOGIN_DOMAIN, SOURCE_DOMAIN, DICTIONARY_DOMAIN,
+                              MARKET_PRICE_DOMAIN, MARKET_BY_ORDER_DOMAIN,
+                              MARKET_BY_PRICE_DOMAIN };
   static RwfQos  qos      = { QOS_TIME_REALTIME, QOS_RATE_TICK_BY_TICK, 0, 0, 0 };
 
   char         buf[ 1024 ];
   MDMsgMem     mem;
-  RwfMapWriter map( mem, this->dict.rdm_dict, buf, sizeof( buf ) );
+  RwfMapWriter map( mem, dict_ref.rdm_dict, buf, sizeof( buf ) );
   RwfState     state = { STREAM_STATE_OPEN, DATA_STATE_OK, 0, { "OK", 2 } };
 
   RwfFilterListWriter
@@ -58,7 +70,7 @@ TestPublish::add_test_source( const char *feed_name,
      .append_string( NAME        , feed_name )
      .append_string( VEND        , "Test" )
      .append_uint  ( IS_SRC      , 0 )
-     .append_array ( CAPAB       , cap , 4, MD_UINT )
+     .append_array ( CAPAB       , cap , 6, MD_UINT )
      .append_array ( DICT_PROV   , dict, 2 )
      .append_array ( DICT_USED   , dict, 2 )
      .append_array ( QOS         , &qos, 1 )
@@ -108,7 +120,7 @@ TestPublish::add_test_source( const char *feed_name,
     if ( m != NULL )
       m->print( &mout );
   }
-  this->source_db.update_source_map( this->start_ns, *m );
+  source_db.update_source_map( start_ns, *m );
 }
 
 void

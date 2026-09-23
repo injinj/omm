@@ -19,6 +19,7 @@
 #include <raimd/app_a.h>
 #include <raimd/enum_def.h>
 #include <omm/test_pub.h>
+#include <omm/book_pub.h>
 #include <omm/test_replay.h>
 #include <omm/rv_submgr.h>
 #include <sassrv/ev_rv_client.h>
@@ -56,7 +57,9 @@ struct Args : public MainLoopVars { /* argv[] parsed args */
   EvRvClientParameters  rv;
   int                   omm_port,
                         ft_weight;
-  bool                  test;
+  bool                  test,
+                        book;    /* -b synthetic MBO / MBP books */
+  int                   book_part; /* -B refresh entries per part */
   Args() : path( 0 ), feed( 0 ), file_name( 0 ), prefix( 0 ),
            msg_fmt( 0 ), log_file( 0 ),
            ads( NULL, "omm_server", "256", NULL, NULL, NULL ),
@@ -209,12 +212,22 @@ Loop::omm_init( void ) noexcept
     print_dict_info( this->r.dict.rdm_dict, "RWFFld", "RWFEnum" );
   }
 
+  if ( this->r.test || this->r.book ) {
+    add_test_source_dir( this->r.dict, this->r.source_db, this->poll.now_ns,
+                         this->r.feed, 100 );
+    added_sources = true;
+  }
   if ( this->r.test ) {
     TestPublish *p = new ( aligned_malloc( sizeof( TestPublish ) ) )
       TestPublish( this->poll, this->r.dict, this->r.source_db );
-    p->add_test_source( this->r.feed, 100 );
     p->start();
-    added_sources = true;
+  }
+  if ( this->r.book ) {
+    BookPublish *p = new ( aligned_malloc( sizeof( BookPublish ) ) )
+      BookPublish( this->poll, this->r.dict, this->r.source_db );
+    if ( this->r.book_part > 0 )
+      p->part_entries = (uint32_t) this->r.book_part;
+    p->start();
   }
 
   if ( this->r.file_name != NULL && ! this->r.test ) {
@@ -293,7 +306,9 @@ main( int argc, const char *argv[] )
   r.add_desc( "  -m fmt    = rv message format      (TIB_QFORM)" );
   r.add_desc( "  -l file   = log file" );
   r.add_desc( "  -g        = turn on debug" );
-  r.add_desc( "  -t        = add test sources" );
+  r.add_desc( "  -t        = add test sources       (<feed>.REC.*)" );
+  r.add_desc( "  -b        = add synthetic order books (<feed>.MBO.*, <feed>.MBP.*)" );
+  r.add_desc( "  -B n      = book refresh entries per part (0 = one part)" );
   r.add_desc( "  -w weight = rv ft weight" );
   r.add_desc( "  -p host   = connect to publisher, interactive or bcast" );
   r.add_desc( "  -i app_id = identify app           (256)" );
@@ -318,6 +333,8 @@ main( int argc, const char *argv[] )
   r.ads.user   = r.rv.userid;
   r.path       = r.get_arg( argc, argv, 1, "-c", ".", "cfile_path" );
   r.test       = r.bool_arg( argc, argv, 0, "-t", NULL, NULL );
+  r.book       = r.bool_arg( argc, argv, 0, "-b", NULL, NULL );
+  r.book_part  = r.int_arg( argc, argv, 1, "-B", "0", NULL );
   r.feed       = r.get_arg( argc, argv, 1, "-r", "RSF" );
   r.file_name  = r.get_arg( argc, argv, 1, "-f", NULL );
   if ( r.bool_arg( argc, argv, 0, "-g", NULL, NULL ) )

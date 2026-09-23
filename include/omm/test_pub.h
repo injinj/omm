@@ -26,6 +26,10 @@ struct TestRoute {
   void update( uint64_t cur_ns ) noexcept;
 };
 
+void add_test_source_dir( OmmDict &dict,  OmmSourceDB &source_db,
+                          uint64_t start_ns,  const char *feed_name,
+                          uint32_t service_id ) noexcept;
+
 struct TestPublish : public EvSocket, public RouteNotify {
   EvPoll        & poll;
   RoutePublish  & sub_route;

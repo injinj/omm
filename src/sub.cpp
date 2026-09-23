@@ -229,8 +229,10 @@ EvOmmConn::on_msg( EvPublish &pub ) noexcept
   bool            solicited = false,
                   closing   = false;
 
+  bool complete = true; /* multipart refresh: streams settle on the last */
   if ( msg_class == REFRESH_MSG_CLASS ) {
     solicited = ( msg_flags & RWF_REFRESH_SOLICITED ) != 0;
+    complete  = ( msg_flags & RWF_REFRESH_REFRESH_COMPLETE ) != 0;
     /* hdr_size(2) class(1) domain(1) stream(4) flags(u15) container(1)
      * [seq_num(4)] state */
     state_off = 8 + ( m[ 8 ] < 0x80 ? 1 : 2 ) + 1 +
@@ -258,15 +260,15 @@ EvOmmConn::on_msg( EvPublish &pub ) noexcept
       case REFRESH_MSG_CLASS:
         if ( rt->stream_type == IS_SNAPSHOT ) {
           st   = state_off; /* rewrite OPEN -> NON_STREAMING */
-          drop = true;
+          drop = complete;
         }
         else if ( solicited ) {
           if ( rt->stream_type != IS_SOLICITED )
             send = false;
-          else
+          else if ( complete )
             rt->stream_type = IS_NONE;
         }
-        else if ( rt->stream_type == IS_SOLICITED )
+        else if ( rt->stream_type == IS_SOLICITED && complete )
           rt->stream_type = IS_NONE; /* the image arrived unsolicited */
         break;
       case UPDATE_MSG_CLASS:
