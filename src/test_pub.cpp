@@ -187,6 +187,8 @@ TestPublish::on_sub( NotifySub &sub ) noexcept
 
   if ( (src = this->source_db.match_sub( ric, ric_len, domain, 0 )) == NULL )
     return;
+  if ( domain != MARKET_PRICE_DOMAIN ) /* the books are BookPublish's */
+    return;
 
   RouteLoc    loc;
   TestRoute * rt = this->test_tab.upsert( sub.subj_hash, sub.subject,

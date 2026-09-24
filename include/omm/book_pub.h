@@ -46,27 +46,42 @@ struct BookLevel {     /* MBP aggregate of one price / side */
   uint64_t time_ms;    /* LV_TIM_MS */
 };
 
-static const uint32_t BOOK_MAX_ORDERS = 64,
-                      BOOK_MAX_EVENTS = 16,
-                      BOOK_DEPTH      = 5;   /* levels per side kept */
+struct BookShape {         /* book size, from the command line */
+  uint32_t depth,          /* price levels per side kept */
+           per_level,      /* max orders per level */
+           max_orders,     /* 2 * depth * per_level */
+           max_events;     /* per tick: a shift moves a whole level */
+  BookShape( uint32_t d = 5,  uint32_t pl = 3 ) { this->set( d, pl ); }
+  void set( uint32_t d,  uint32_t pl ) {
+    this->depth      = ( d == 0 ? 1 : d );
+    this->per_level  = ( pl == 0 ? 1 : pl );
+    this->max_orders = 2 * this->depth * this->per_level;
+    this->max_events = 2 * this->per_level + 8;
+  }
+};
 
+/* one synthetic book; orders / events / before are sized by BookShape
+ * and allocated with the route (alloc), a RouteVec entry can't hold
+ * variable arrays */
 struct BookRoute {
-  uint64_t  seqno,
-            rand_state;
-  int32_t   mid;                        /* mid price ticks */
-  uint32_t  next_id,
-            order_cnt,
-            event_cnt;
-  BookOrder orders[ BOOK_MAX_ORDERS ];
-  BookEvent events[ BOOK_MAX_EVENTS ];  /* last tick's changes */
-  BookLevel before[ BOOK_MAX_EVENTS ];  /* MBP: levels before the tick */
-  uint32_t  before_cnt;
-  uint8_t   domain;                     /* MARKET_BY_ORDER / MARKET_BY_PRICE */
-  bool      is_active;
-  uint32_t  hash;
-  uint16_t  len;
-  char      value[ 2 ];
+  uint64_t    seqno,
+              rand_state;
+  int32_t     mid;                        /* mid price ticks */
+  uint32_t    next_id,
+              order_cnt,
+              event_cnt,
+              before_cnt;
+  BookOrder * orders;                     /* [ shape.max_orders ] */
+  BookEvent * events;                     /* [ shape.max_events ] tick */
+  BookLevel * before;                     /* [ shape.max_events ] MBP */
+  BookShape   shape;
+  uint8_t     domain;                     /* MARKET_BY_ORDER / _PRICE */
+  bool        is_active;
+  uint32_t    hash;
+  uint16_t    len;
+  char        value[ 2 ];
 
+  void     alloc( const BookShape &sh ) noexcept;
   void     init( uint64_t cur_ns,  uint8_t domain ) noexcept;
   uint32_t rand( void ) noexcept;
   uint32_t rand( uint32_t n ) { return this->rand() % n; }
@@ -86,7 +101,8 @@ struct BookPublish : public EvSocket, public RouteNotify {
   OmmDict       & dict;
   OmmSourceDB   & source_db;
   RouteVec<BookRoute> book_tab;
-  uint32_t        tick_ms,       /* timer period */
+  BookShape       shape;         /* -L levels, -O orders per level */
+  uint32_t        tick_ms,       /* timer period (-T) */
                   part_entries;  /* refresh entries per part, 0 = one part */
 
   void * operator new( size_t, void *ptr ) { return ptr; }

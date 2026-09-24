@@ -112,7 +112,8 @@ struct EvOmmConn : public kv::EvConnection {
   IpcFrag            ipc_fragment;
   size_t             max_frag_size;
   uint32_t           next_frag_num,
-                     src_count;
+                     src_count,
+                     conn_ver;      /* handshake version, IPC_CONN_VER_1x */
   OmmSubTab          sub_tab;
   kv::UIntHashTab  * stream_ht;
   OmmSourceDB      & source_db;
@@ -121,8 +122,9 @@ struct EvOmmConn : public kv::EvConnection {
   EvOmmConn( kv::EvPoll &p,  uint8_t st,  kv::RoutePublish &sr,  OmmDict &d,
              OmmSourceDB &db )
     : kv::EvConnection( p, st ), sub_route( sr ), max_frag_size( 6 * 1024 ),
-      next_frag_num( 0 ), src_count( 0 ), stream_ht( 0 ), source_db( db ),
-      dict( d ) {}
+      next_frag_num( 0 ), src_count( 0 ), conn_ver( IPC_CONN_VER_13 ),
+      stream_ht( 0 ), source_db( db ), dict( d ) {}
+  uint8_t frag_id_len( void ) const { return ipc_frag_id_len( this->conn_ver ); }
 
   void init_streams( void ) noexcept;
   void release_streams( void ) noexcept;

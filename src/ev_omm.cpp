@@ -76,7 +76,7 @@ EvOmmService::process( void ) noexcept
   while ( this->off < this->len ) {
     size_t buflen = this->len - this->off;
     char * buf = &this->recv[ this->off ];
-    IpcHdr ipc;
+    IpcHdr ipc( this->frag_id_len() );
     int status = ipc.parse( (uint8_t *) buf, buflen );
 
     if ( status >= 0 ) {
@@ -155,9 +155,10 @@ EvOmmService::dispatch_msg( IpcHdr &ipc,  char *buf ) noexcept
                             PING_TIMER_EVENT = 1;
       this->poll.timer.add_timer_millis( this->fd, c.ping_timeout * 1000 / 2,
                                          PING_TIMER_ID, PING_TIMER_EVENT );
-      ServerInitRec r( c.conn_ver == IPC_CONN_VER_13 ? RIPC_VERSION_13 :
-                                                       RIPC_VERSION_14 );
-      init_component_string( r );
+      this->conn_ver = c.conn_ver; /* 19..23, checked by unpack() */
+      ServerInitRec r( ripc_version_of( c.conn_ver ) );
+      if ( ! r.is_legacy() )
+        init_component_string( r );
       size_t len = r.pack_len();
       char * p = this->alloc( len );
       r.pack( p );
@@ -361,14 +362,32 @@ void
 EvOmmConn::fragment_msg( const uint8_t *buf,  const size_t len,
                          const uint32_t stream_id ) noexcept
 {
-  size_t    first_frag = this->max_frag_size - 10,
-            next_frag  = this->max_frag_size - 6,
+  /* frag id is 2 bytes for conn ver >= 13, 1 byte before (RFA 7.2) */
+  const size_t fid        = this->frag_id_len(),
+               first_hdr  = 8 + fid,   /* len op ext extlen(4) fragid */
+               next_hdr   = 4 + fid;   /* len op ext fragid */
+  size_t    first_frag = this->max_frag_size - first_hdr,
+            next_frag  = this->max_frag_size - next_hdr,
             frag_cnt   = 1 + ( (len - first_frag + next_frag - 1) / next_frag ),
-            frag_len   = first_frag + 10;
+            frag_len   = first_frag + first_hdr;
   uint8_t * frag       = (uint8_t *) this->alloc( frag_len );
   uint16_t  frag_num   = ++this->next_frag_num;
-  if ( frag_num == 0 )
+  if ( fid == 1 )
+    frag_num &= 0xffU;
+  if ( frag_num == 0 ) {
     frag_num = ++this->next_frag_num;
+    if ( fid == 1 )
+      frag_num &= 0xffU;
+  }
+  auto put_fid = [ fid ]( uint8_t *p,  uint16_t n ) {
+    if ( fid == 2 ) {
+      p[ 0 ] = ( n >> 8 ) & 0xffU;
+      p[ 1 ] = n & 0xffU;
+    }
+    else {
+      p[ 0 ] = n & 0xffU;
+    }
+  };
 
   frag[ 0 ] = ( frag_len >> 8 ) & 0xffU;
   frag[ 1 ] = frag_len & 0xffU;
@@ -378,40 +397,37 @@ EvOmmConn::fragment_msg( const uint8_t *buf,  const size_t len,
   frag[ 5 ] = ( len >> 16 ) & 0xffU;
   frag[ 6 ] = ( len >> 8 ) & 0xffU;
   frag[ 7 ] = len & 0xffU;
-  frag[ 8 ] = ( frag_num >> 8 ) & 0xffU;
-  frag[ 9 ] = frag_num & 0xffU;
-  ::memcpy( &frag[ 10 ], buf, first_frag );
+  put_fid( &frag[ 8 ], frag_num );
+  ::memcpy( &frag[ first_hdr ], buf, first_frag );
   if ( stream_id != 0 )
-    set_u32<MD_BIG>( &frag[ 10 + 4 ], stream_id );
+    set_u32<MD_BIG>( &frag[ first_hdr + 4 ], stream_id );
   this->sz += frag_len;
   size_t off = first_frag;
 
   for ( size_t i = 1; i < frag_cnt - 1; i++ ) {
-    frag_len = next_frag + 6;
+    frag_len = next_frag + next_hdr;
     frag     = (uint8_t *) this->alloc( frag_len );
 
     frag[ 0 ] = ( frag_len >> 8 ) & 0xffU;
     frag[ 1 ] = frag_len & 0xffU;
     frag[ 2 ] = IPC_DATA | IPC_EXTENDED_FLAGS;
     frag[ 3 ] = EXTENDED_IPC_FRAG;
-    frag[ 4 ] = ( frag_num >> 8 ) & 0xffU;
-    frag[ 5 ] = frag_num & 0xffU;
-    ::memcpy( &frag[ 6 ], &buf[ off ], next_frag );
+    put_fid( &frag[ 4 ], frag_num );
+    ::memcpy( &frag[ next_hdr ], &buf[ off ], next_frag );
     this->sz += frag_len;
     off += next_frag;
   }
 
   size_t last_frag = len - off;
-  frag_len = last_frag + 6;
+  frag_len = last_frag + next_hdr;
   frag     = (uint8_t *) this->alloc( frag_len );
 
   frag[ 0 ] = ( frag_len >> 8 ) & 0xffU;
   frag[ 1 ] = frag_len & 0xffU;
   frag[ 2 ] = IPC_DATA | IPC_EXTENDED_FLAGS;
   frag[ 3 ] = EXTENDED_IPC_FRAG;
-  frag[ 4 ] = ( frag_num >> 8 ) & 0xffU;
-  frag[ 5 ] = frag_num & 0xffU;
-  ::memcpy( &frag[ 6 ], &buf[ off ], last_frag );
+  put_fid( &frag[ 4 ], frag_num );
+  ::memcpy( &frag[ next_hdr ], &buf[ off ], last_frag );
   this->sz += frag_len;
 }
 

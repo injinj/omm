@@ -121,7 +121,7 @@ EvOmmClient::process( void ) noexcept
   while ( this->off < this->len ) {
     size_t buflen = this->len - this->off;
     char * buf = &this->recv[ this->off ];
-    IpcHdr ipc;
+    IpcHdr ipc( this->frag_id_len() );
     int status = ipc.parse( (uint8_t *) buf, buflen );
 
     if ( status >= 0 ) {

@@ -65,10 +65,32 @@ op_code = IPC_DATA(2) | IPC_EXTENDED(1)
 extended = EXTENDED_IPC_FRAG(8)
  */
 
+/* connection handshake versions (client init record) and the ripc version
+ * the server answers with; RTSDK accepts 10..14, RFA 7.2 (2012) sends 12,
+ * RFA 7.5 (2013) sends 13.  <= 12: no component version string in either
+ * direction, 1-byte fragment ids */
 static const uint32_t IPC_CONN_VER_14        = 23,
                       IPC_CONN_VER_13        = 22,
+                      IPC_CONN_VER_12        = 21,
+                      IPC_CONN_VER_11        = 20,
+                      IPC_CONN_VER_10        = 19,
                       RIPC_VERSION_14        = 9,
-                      RIPC_VERSION_13        = 8;
+                      RIPC_VERSION_13        = 8,
+                      RIPC_VERSION_12        = 7,
+                      RIPC_VERSION_11        = 6,
+                      RIPC_VERSION_10        = 5;
+static inline bool ipc_conn_ver_ok( uint32_t v ) {
+  return v >= IPC_CONN_VER_10 && v <= IPC_CONN_VER_14;
+}
+static inline uint32_t ripc_version_of( uint32_t conn_ver ) {
+  return conn_ver - IPC_CONN_VER_10 + RIPC_VERSION_10; /* 19..23 -> 5..9 */
+}
+static inline bool ipc_has_component_ver( uint32_t conn_ver ) {
+  return conn_ver >= IPC_CONN_VER_13;
+}
+static inline uint8_t ipc_frag_id_len( uint32_t conn_ver ) {
+  return conn_ver >= IPC_CONN_VER_13 ? 2 : 1;
+}
 static const uint8_t  IPC_SERVER_PING        = 2,
                       IPC_CLIENT_PING        = 1,
                       IPC_EXTENDED_FLAGS     = 1,
@@ -99,7 +121,10 @@ struct IpcHdr {
            next_off;
   uint16_t frag_id;
   uint8_t  op_code,
-           extended_op;
+           extended_op,
+           frag_id_len; /* 2 for conn ver >= 13, 1 before (set by the conn) */
+
+  IpcHdr( uint8_t fid_len = 2 ) : frag_id_len( fid_len ) {}
 
   Status parse( const uint8_t *buf,  size_t len ) {
     if ( len < 3 )
@@ -133,11 +158,16 @@ struct IpcHdr {
       }
       if ( ( this->extended_op & ( EXTENDED_IPC_FRAG |
                                    EXTENDED_IPC_FRAG_HEADER ) ) != 0 ) {
-        if ( i + 2 > len )
+        if ( i + this->frag_id_len > len )
           return NOT_ENOUGH_HDR;
-        this->frag_id      = ( (uint16_t) buf[ i ] << 8 ) |
-                             ( (uint16_t) buf[ i+1 ] );
-        i += 2;
+        if ( this->frag_id_len == 2 ) {
+          this->frag_id = ( (uint16_t) buf[ i ] << 8 ) |
+                          ( (uint16_t) buf[ i+1 ] );
+          i += 2;
+        }
+        else {
+          this->frag_id = buf[ i++ ];
+        }
       }
       this->header_len = i;
       if ( this->extended_len + this->header_len == this->ipc_len )
@@ -263,13 +293,21 @@ struct ClientInitRec {
     if ( this->ip_addr_len > sizeof( this->ip_addr ) )
       this->ip_addr_len = sizeof( this->ip_addr );
     ::memcpy( this->ip_addr, inp.buf, this->ip_addr_len );
+    inp.incr( this->ip_addr_len );
 
-    inp.seek( hdr_size )
-       .u8  ( comp_len_size )
-       .u8  ( this->comp_len );
+    if ( ! ipc_conn_ver_ok( this->conn_ver ) )
+      return false;
+    /* conn ver 13+: component version block at hdr_size (RFA 7.5, RTSDK);
+     * ver 10..12 (RFA 7.2 and older) end after the ip address */
+    if ( ipc_has_component_ver( this->conn_ver ) &&
+         (size_t) hdr_size + 2 <= len ) {
+      inp.seek( hdr_size )
+         .u8  ( comp_len_size )
+         .u8  ( this->comp_len );
 
-    ::memcpy( this->comp_ver, inp.buf, this->comp_len );
-    inp.incr( this->comp_len );
+      ::memcpy( this->comp_ver, inp.buf, this->comp_len );
+      inp.incr( this->comp_len );
+    }
 
     if ( inp.ok ) {
       if ( inp.buf > inp.eob )
@@ -310,7 +348,14 @@ struct ServerInitRec {
     this->minor         = 1;
   }
 
+  bool is_legacy( void ) const { /* ripc 5..7: no component version */
+    return this->ripc_ver < RIPC_VERSION_13;
+  }
   size_t pack_len( void ) const {
+    if ( this->is_legacy() )
+      return 19;
+    if ( this->ripc_ver < RIPC_VERSION_14 )
+      return 21 + this->comp_len; /* no key exchange triple */
     return 24 + this->comp_len;
   }
   void pack( char *p ) const {
@@ -328,11 +373,18 @@ struct ServerInitRec {
        .n8 ( this->major )
        .n8 ( this->minor )
        .n16( this->comp )
-       .n8 ( this->zlib )
-       .n8 ( this->key_ex )    /* KEY EX */
-       .n8 ( this->enc_type )  /* encrypt type */
-       .n8 ( this->exchg_len ) /* exchange len */
-       .n8 ( this->comp_len + 2 )
+       .n8 ( this->zlib );
+    if ( this->is_legacy() ) /* 19 bytes, as ADS 3.x answers RFA 7.2 */
+      return;
+    /* v14 asks for a key exchange (client fl 08); answer with key_ex = 0
+     * to decline it (a useless extra round trip).  v13 clients (RFA 7.5,
+     * upa 2017) have no such block: ADS/RTSDK go straight from the zlib
+     * byte to the component version for them */
+    if ( this->ripc_ver >= RIPC_VERSION_14 )
+      out.n8 ( this->key_ex )    /* KEY EX */
+         .n8 ( this->enc_type )  /* encrypt type */
+         .n8 ( this->exchg_len );/* exchange len */
+    out.n8 ( this->comp_len + 2 )
        .n8 ( this->comp_len )
        .b  ( this->comp_ver, this->comp_len );
   }

@@ -59,7 +59,10 @@ struct Args : public MainLoopVars { /* argv[] parsed args */
                         ft_weight;
   bool                  test,
                         book;    /* -b synthetic MBO / MBP books */
-  int                   book_part; /* -B refresh entries per part */
+  int                   book_part, /* -B refresh entries per part */
+                        book_levels, /* -L price levels per side */
+                        book_orders, /* -O max orders per level */
+                        book_tick;   /* -T tick ms */
   Args() : path( 0 ), feed( 0 ), file_name( 0 ), prefix( 0 ),
            msg_fmt( 0 ), log_file( 0 ),
            ads( NULL, "omm_server", "256", NULL, NULL, NULL ),
@@ -227,6 +230,13 @@ Loop::omm_init( void ) noexcept
       BookPublish( this->poll, this->r.dict, this->r.source_db );
     if ( this->r.book_part > 0 )
       p->part_entries = (uint32_t) this->r.book_part;
+    p->shape.set( (uint32_t) this->r.book_levels,
+                  (uint32_t) this->r.book_orders );
+    if ( this->r.book_tick > 0 )
+      p->tick_ms = (uint32_t) this->r.book_tick;
+    printf( "books: %u levels/side, up to %u orders/level (max %u), tick %u ms\n",
+            p->shape.depth, p->shape.per_level, p->shape.max_orders,
+            p->tick_ms );
     p->start();
   }
 
@@ -309,6 +319,9 @@ main( int argc, const char *argv[] )
   r.add_desc( "  -t        = add test sources       (<feed>.REC.*)" );
   r.add_desc( "  -b        = add synthetic order books (<feed>.MBO.*, <feed>.MBP.*)" );
   r.add_desc( "  -B n      = book refresh entries per part (0 = one part)" );
+  r.add_desc( "  -L n      = book price levels per side   (5)" );
+  r.add_desc( "  -O n      = book max orders per level    (3)" );
+  r.add_desc( "  -T ms     = book tick period             (250)" );
   r.add_desc( "  -w weight = rv ft weight" );
   r.add_desc( "  -p host   = connect to publisher, interactive or bcast" );
   r.add_desc( "  -i app_id = identify app           (256)" );
@@ -335,6 +348,9 @@ main( int argc, const char *argv[] )
   r.test       = r.bool_arg( argc, argv, 0, "-t", NULL, NULL );
   r.book       = r.bool_arg( argc, argv, 0, "-b", NULL, NULL );
   r.book_part  = r.int_arg( argc, argv, 1, "-B", "0", NULL );
+  r.book_levels= r.int_arg( argc, argv, 1, "-L", "5", NULL );
+  r.book_orders= r.int_arg( argc, argv, 1, "-O", "3", NULL );
+  r.book_tick  = r.int_arg( argc, argv, 1, "-T", "250", NULL );
   r.feed       = r.get_arg( argc, argv, 1, "-r", "RSF" );
   r.file_name  = r.get_arg( argc, argv, 1, "-f", NULL );
   if ( r.bool_arg( argc, argv, 0, "-g", NULL, NULL ) )

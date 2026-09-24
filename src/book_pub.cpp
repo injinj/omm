@@ -23,6 +23,15 @@ static const char * mkt_mkr[ 4 ] = { "MM01", "MM02", "MM03", "MM04" };
 /* ---- book model ---- */
 
 void
+BookRoute::alloc( const BookShape &sh ) noexcept
+{
+  this->shape  = sh;
+  this->orders = (BookOrder *) ::malloc( sizeof( BookOrder ) * sh.max_orders );
+  this->events = (BookEvent *) ::malloc( sizeof( BookEvent ) * sh.max_events );
+  this->before = (BookLevel *) ::malloc( sizeof( BookLevel ) * sh.max_events );
+}
+
+void
 BookRoute::init( uint64_t cur_ns,  uint8_t dom ) noexcept
 {
   this->seqno      = 0;
@@ -36,18 +45,22 @@ BookRoute::init( uint64_t cur_ns,  uint8_t dom ) noexcept
   this->is_active  = false;
 
   uint64_t ms = ( cur_ns / 1000000 ) % 86400000;
-  for ( uint32_t i = 1; i <= BOOK_DEPTH; i++ ) {
-    uint32_t n = 1 + this->rand( 3 );
+  /* the mid must leave room for the bid side */
+  if ( this->mid <= (int32_t) this->shape.depth + 1 )
+    this->mid = (int32_t) this->shape.depth + 2;
+  for ( uint32_t i = 1; i <= this->shape.depth; i++ ) {
+    uint32_t n = 1 + this->rand( this->shape.per_level );
     for ( uint32_t j = 0; j < n; j++ )
       this->add_order( BOOK_BID, this->mid - (int32_t) i,
                        ( 1 + this->rand( 20 ) ) * 100, ms );
-    n = 1 + this->rand( 3 );
+    n = 1 + this->rand( this->shape.per_level );
     for ( uint32_t j = 0; j < n; j++ )
       this->add_order( BOOK_ASK, this->mid + (int32_t) i,
                        ( 1 + this->rand( 20 ) ) * 100, ms );
+    /* add_order counts events; the initial book is the refresh */
+    this->event_cnt  = 0;
+    this->before_cnt = 0;
   }
-  this->event_cnt  = 0; /* the initial book is the refresh, not events */
-  this->before_cnt = 0;
 }
 
 uint32_t
@@ -104,7 +117,7 @@ BookRoute::note_level( int32_t prc,  uint8_t side ) noexcept
   for ( uint32_t i = 0; i < this->before_cnt; i++ )
     if ( this->before[ i ].prc == prc && this->before[ i ].side == side )
       return;
-  if ( this->before_cnt < BOOK_MAX_EVENTS )
+  if ( this->before_cnt < this->shape.max_events )
     this->level( prc, side, this->before[ this->before_cnt++ ] );
 }
 
@@ -112,8 +125,8 @@ void
 BookRoute::add_order( uint8_t side,  int32_t prc,  uint32_t size,
                       uint64_t ms ) noexcept
 {
-  if ( this->order_cnt >= BOOK_MAX_ORDERS ||
-       this->event_cnt >= BOOK_MAX_EVENTS )
+  if ( this->order_cnt >= this->shape.max_orders ||
+       this->event_cnt >= this->shape.max_events )
     return;
   this->note_level( prc, side );
   BookOrder & o = this->orders[ this->order_cnt++ ];
@@ -131,7 +144,7 @@ BookRoute::add_order( uint8_t side,  int32_t prc,  uint32_t size,
 void
 BookRoute::del_order( uint32_t i,  uint64_t ms ) noexcept
 {
-  if ( i >= this->order_cnt || this->event_cnt >= BOOK_MAX_EVENTS )
+  if ( i >= this->order_cnt || this->event_cnt >= this->shape.max_events )
     return;
   BookOrder & o = this->orders[ i ];
   this->note_level( o.prc, o.side );
@@ -145,7 +158,7 @@ BookRoute::del_order( uint32_t i,  uint64_t ms ) noexcept
 void
 BookRoute::upd_order( uint32_t i,  uint32_t size,  uint64_t ms ) noexcept
 {
-  if ( i >= this->order_cnt || this->event_cnt >= BOOK_MAX_EVENTS )
+  if ( i >= this->order_cnt || this->event_cnt >= this->shape.max_events )
     return;
   BookOrder & o = this->orders[ i ];
   this->note_level( o.prc, o.side );
@@ -162,8 +175,9 @@ BookRoute::upd_order( uint32_t i,  uint32_t size,  uint64_t ms ) noexcept
 void
 BookRoute::tick( uint64_t cur_ns ) noexcept
 {
-  uint64_t ms = ( cur_ns / 1000000 ) % 86400000;
-  uint32_t r  = this->rand( 100 );
+  uint64_t ms    = ( cur_ns / 1000000 ) % 86400000;
+  uint32_t r     = this->rand( 100 ),
+           depth = this->shape.depth;
 
   this->event_cnt  = 0;
   this->before_cnt = 0;
@@ -176,33 +190,33 @@ BookRoute::tick( uint64_t cur_ns ) noexcept
   else if ( r < 65 && this->order_cnt > 4 ) {
     this->del_order( this->rand( this->order_cnt ), ms );
   }
-  else if ( r < 85 && this->order_cnt + 2 < BOOK_MAX_ORDERS ) {
+  else if ( r < 85 && this->order_cnt + 2 < this->shape.max_orders ) {
     uint8_t side = (uint8_t) ( 1 + this->rand( 2 ) );
     int32_t prc  = ( side == BOOK_BID ) ?
-                   this->mid - 1 - (int32_t) this->rand( BOOK_DEPTH ) :
-                   this->mid + 1 + (int32_t) this->rand( BOOK_DEPTH );
+                   this->mid - 1 - (int32_t) this->rand( depth ) :
+                   this->mid + 1 + (int32_t) this->rand( depth );
     this->add_order( side, prc, ( 1 + this->rand( 20 ) ) * 100, ms );
   }
   else {
     int32_t dir = ( this->rand( 2 ) == 0 ) ? -1 : 1;
-    if ( this->mid + dir <= (int32_t) BOOK_DEPTH + 1 )
+    if ( this->mid + dir <= (int32_t) depth + 1 )
       dir = 1;
     this->mid += dir;
-    /* the far side loses its deepest level */
+    /* the far side loses its deepest level (bounded by max_events) */
     for ( uint32_t i = 0; i < this->order_cnt; ) {
       BookOrder & o = this->orders[ i ];
       bool out = ( o.side == BOOK_BID ) ?
-                 o.prc < this->mid - (int32_t) BOOK_DEPTH :
-                 o.prc > this->mid + (int32_t) BOOK_DEPTH;
-      if ( out && this->event_cnt + 3 < BOOK_MAX_EVENTS )
+                 o.prc < this->mid - (int32_t) depth :
+                 o.prc > this->mid + (int32_t) depth;
+      if ( out && this->event_cnt + 3 < this->shape.max_events )
         this->del_order( i, ms ); /* compacts, i stays */
       else
         i++;
     }
     /* the near side gets a new best */
-    uint8_t side = ( dir > 0 ) ? BOOK_BID : BOOK_ASK;
-    int32_t prc  = ( dir > 0 ) ? this->mid - 1 : this->mid + 1;
-    uint32_t n   = 1 + this->rand( 2 );
+    uint8_t  side = ( dir > 0 ) ? BOOK_BID : BOOK_ASK;
+    int32_t  prc  = ( dir > 0 ) ? this->mid - 1 : this->mid + 1;
+    uint32_t n    = 1 + this->rand( this->shape.per_level );
     for ( uint32_t j = 0; j < n; j++ )
       this->add_order( side, prc, ( 1 + this->rand( 20 ) ) * 100, ms );
   }
@@ -213,7 +227,8 @@ BookRoute::tick( uint64_t cur_ns ) noexcept
 BookPublish::BookPublish( EvPoll &p,  OmmDict &d,  OmmSourceDB &db ) noexcept
            : EvSocket( p, p.register_type( "omm_book_pub" ) ),
              RouteNotify( p.sub_route ), poll( p ), sub_route( p.sub_route ),
-             dict( d ), source_db( db ), tick_ms( 250 ), part_entries( 0 )
+             dict( d ), source_db( db ), shape(), tick_ms( 250 ),
+             part_entries( 0 )
 {
   this->sock_opts = OPT_NO_POLL;
 }
@@ -252,8 +267,10 @@ BookPublish::on_sub( NotifySub &sub ) noexcept
   RouteLoc    loc;
   BookRoute * rt = this->book_tab.upsert( sub.subj_hash, sub.subject,
                                           sub.subject_len, loc );
-  if ( loc.is_new )
+  if ( loc.is_new ) {
+    rt->alloc( this->shape );
     rt->init( this->poll.now_ns, domain );
+  }
   if ( ! rt->is_active ) {
     printf( "start book %.*s\n", (int) sub.subject_len, sub.subject );
     rt->is_active = true;
@@ -385,11 +402,14 @@ BookPublish::initial( const char *reply,  size_t reply_len,  OmmSource *src,
                       const char *ric,  size_t ric_len,  BookRoute *rt,
                       bool is_solicited ) noexcept
 {
-  char      buf[ 16 * 1024 ];
-  MDMsgMem  mem;
-  BookLevel lvls[ BOOK_MAX_ORDERS ];
-  uint32_t  total = 0;
-  bool      is_mbo = ( rt->domain == MARKET_BY_ORDER_DOMAIN );
+  MDMsgMem    mem;
+  /* the whole book in one part: ~48 bytes an order + headers */
+  size_t      buf_len = (size_t) rt->order_cnt * 64 + 4 * 1024;
+  char      * buf     = (char *) mem.make( buf_len );
+  BookLevel * lvls    = (BookLevel *)
+                        mem.make( sizeof( BookLevel ) * ( rt->order_cnt + 1 ) );
+  uint32_t    total   = 0;
+  bool        is_mbo  = ( rt->domain == MARKET_BY_ORDER_DOMAIN );
 
   if ( is_mbo )
     total = rt->order_cnt;
@@ -412,7 +432,7 @@ BookPublish::initial( const char *reply,  size_t reply_len,  OmmSource *src,
 
   for ( uint32_t part = 0, k = 0; part < nparts; part++ ) {
     bool last = ( part + 1 == nparts );
-    RwfMsgWriter msg( mem, this->dict.rdm_dict, buf, sizeof( buf ),
+    RwfMsgWriter msg( mem, this->dict.rdm_dict, buf, buf_len,
                       REFRESH_MSG_CLASS, (RdmDomainType) rt->domain,
                       rt->hash );
     if ( part == 0 )
@@ -461,12 +481,13 @@ void
 BookPublish::update( OmmSource *src,  const char *ric,  size_t ric_len,
                      BookRoute *rt ) noexcept
 {
-  char     buf[ 8 * 1024 ];
   MDMsgMem mem;
-  bool     is_mbo = ( rt->domain == MARKET_BY_ORDER_DOMAIN );
-  uint32_t cnt    = 0;
+  size_t   buf_len = (size_t) rt->shape.max_events * 64 + 1024;
+  char   * buf     = (char *) mem.make( buf_len );
+  bool     is_mbo  = ( rt->domain == MARKET_BY_ORDER_DOMAIN );
+  uint32_t cnt     = 0;
 
-  RwfMsgWriter msg( mem, this->dict.rdm_dict, buf, sizeof( buf ),
+  RwfMsgWriter msg( mem, this->dict.rdm_dict, buf, buf_len,
                     UPDATE_MSG_CLASS, (RdmDomainType) rt->domain, rt->hash );
   msg.add_seq_num( (uint32_t) rt->seqno )
      .add_msg_key()
