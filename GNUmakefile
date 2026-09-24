@@ -235,7 +235,8 @@ gen_files   :=
 ev_omm_defines  := -DOMM_VER=$(ver_build)
 $(objd)/ev_omm.o : .copr/Makefile
 $(objd)/ev_omm.fpic.o : .copr/Makefile
-libomm_files := ev_omm ev_omm_client login src_dir dict sub
+libomm_files := ev_omm ev_omm_client login src_dir dict sub test_pub \
+                test_replay book_pub
 libomm_cfile := $(addprefix src/, $(addsuffix .cpp, $(libomm_files)))
 libomm_objs  := $(addprefix $(objd)/, $(addsuffix .o, $(libomm_files)))
 libomm_dbjs  := $(addprefix $(objd)/, $(addsuffix .fpic.o, $(libomm_files)))
@@ -258,7 +259,7 @@ server_includes := $(sassrv_includes)
 rv_submgr_includes := $(sassrv_includes)
 $(objd)/server.o : .copr/Makefile
 $(objd)/server.fpic.o : .copr/Makefile
-omm_server_files := server test_pub test_replay book_pub rv_submgr
+omm_server_files := server rv_submgr
 omm_server_cfile := $(addprefix src/, $(addsuffix .cpp, $(omm_server_files)))
 omm_server_objs  := $(addprefix $(objd)/, $(addsuffix .o, $(omm_server_files)))
 omm_server_deps  := $(addprefix $(dependd)/, $(addsuffix .d, $(omm_server_files)))
