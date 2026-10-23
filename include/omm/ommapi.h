@@ -91,13 +91,11 @@ typedef struct {
 /* fill defaults */
 void omm_InitTransportParams( ommTransportParams *p );
 
-/* ---- api ------------------------------------------------------------------ */
 omm_status   omm_Open( void );
 omm_status   omm_Close( void );
 const char * omm_Version( void );
 const char * ommStatus_GetText( omm_status status );
 
-/* ---- transport ------------------------------------------------------------ */
 omm_status ommTransport_Create( ommTransport *tport,
                                 const ommTransportParams *parms );
 omm_status ommTransport_Destroy( ommTransport tport );
@@ -130,7 +128,6 @@ omm_status ommTransport_SetStateListener( ommTransport tport,  ommQueue queue,
                                           const void *closure,
                                           ommEvent *event );
 
-/* ---- queues --------------------------------------------------------------- */
 typedef void ( *ommQueueOnComplete )( ommQueue queue,  void *closure );
 
 omm_status ommQueue_Create( ommQueue *queue );
@@ -163,7 +160,6 @@ omm_status ommDispatcher_Destroy( ommDispatcher disp );
 omm_status ommDispatcher_SetName( ommDispatcher disp,  const char *name );
 omm_status ommDispatcher_GetName( ommDispatcher disp,  const char **name );
 
-/* ---- events --------------------------------------------------------------- */
 typedef enum {
   OMM_TIMER_EVENT     = 1,
   OMM_LISTEN_EVENT    = 3,
@@ -199,7 +195,6 @@ omm_status ommEvent_GetListenerTransport( ommEvent event,
 omm_status ommEvent_GetTimerInterval( ommEvent event,  double *interval );
 omm_status ommEvent_ResetTimerInterval( ommEvent event,  double interval );
 
-/* ---- messages ------------------------------------------------------------- */
 /* message classes: the RWF msg class of a stream message (rwf values), plus
  * the api's own transport state notifications */
 typedef enum {
